@@ -644,3 +644,34 @@ func TestPipelineGeneralJudgeNoneAndFailurePreserveNFO(t *testing.T) {
 		})
 	}
 }
+
+func TestPipelineEmptyAlternateTitlePreservesVerifiedMovie(t *testing.T) {
+	f := fixturePipeline(t)
+	f.file("Movie.mkv")
+	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"中文片名","chs_title":"中文片名","eng_title":"English Alias","year":2020,"tmdb_id":"42"}]}`
+	var queries []string
+	f.source = func(r *http.Request) (any, bool) {
+		if r.URL.Path == "/3/search/movie" {
+			title := r.URL.Query().Get("query")
+			queries = append(queries, title)
+			if title == "English Alias" {
+				return map[string]any{"page": 1, "total_pages": 1, "total_results": 0, "results": []any{}}, true
+			}
+			if title != "中文片名" {
+				f.t.Errorf("意外查询: %s", title)
+			}
+		}
+		return tmdbMovie(r)
+	}
+	if err := f.run(); err != nil {
+		t.Fatal(err)
+	}
+	got := readNFO(t, filepath.Join(f.root, "Movie.nfo"))
+	if !strings.Contains(got, "<title>Source Movie</title>") || !strings.Contains(got, ">42</uniqueid>") {
+		t.Fatalf("真实候选未进入输出: %s", got)
+	}
+	tasks, _ := f.snapshot()
+	if fmt.Sprint(queries) != "[中文片名 English Alias]" || fmt.Sprint(tasks) != "[extract_media_identity]" {
+		t.Fatalf("未完成搜索核验或意外调用判断/本地整理：queries=%v tasks=%v", queries, tasks)
+	}
+}

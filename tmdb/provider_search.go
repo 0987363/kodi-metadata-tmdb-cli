@@ -138,7 +138,8 @@ func (r providerSearchResponse) validate(page int) error {
 		return fmt.Errorf("TMDb 搜索页数或条数超过 %d，无法完整判断", metadata.MaxDecisionCandidates)
 	}
 	if len(r.Results) == 0 {
-		if page != 1 || *r.TotalPages != 0 || *r.TotalResults != 0 {
+		// TMDb 的零结果第一页可能仍计为一页。
+		if page != 1 || *r.TotalPages > 1 || *r.TotalResults != 0 {
 			return errors.New("TMDb 空搜索页与分页总数矛盾")
 		}
 		return nil

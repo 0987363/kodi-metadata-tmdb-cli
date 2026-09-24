@@ -67,6 +67,9 @@ func TestMetadataSearchRejectsIncompletePagination(t *testing.T) {
 		{"zero_pages_with_hit", `{"page":1,"total_pages":0,"total_results":1,"results":` + hit + `}`, ""},
 		{"negative_total", `{"page":1,"total_pages":1,"total_results":-1,"results":` + hit + `}`, ""},
 		{"short_total", `{"page":1,"total_pages":1,"total_results":2,"results":` + hit + `}`, ""},
+		{"empty_with_multiple_pages", `{"page":1,"total_pages":2,"total_results":0,"results":[]}`, ""},
+		{"empty_with_negative_pages", `{"page":1,"total_pages":-1,"total_results":0,"results":[]}`, ""},
+		{"empty_with_wrong_page", `{"page":2,"total_pages":1,"total_results":0,"results":[]}`, ""},
 		{"empty_with_total", `{"page":1,"total_pages":1,"total_results":1,"results":[]}`, ""},
 		{"page_limit", `{"page":1,"total_pages":255,"total_results":255,"results":` + hit + `}`, ""},
 		{"repeated_page_number", `{"page":1,"total_pages":2,"total_results":2,"results":` + hit + `}`, `{"page":1,"total_pages":2,"total_results":2,"results":` + hit + `}`},
@@ -186,5 +189,55 @@ func TestMetadataSearch404OnLaterPageIsFailure(t *testing.T) {
 	got, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Movie, Title: "Target"})
 	if err == nil || errors.Is(err, metadata.ErrNotFound) || len(got) != 0 {
 		t.Fatalf("第二页404应为搜索故障而非无候选：%+v %v", got, err)
+	}
+}
+
+func TestMetadataSearchAcceptsEmptyFirstPage(t *testing.T) {
+	for _, kind := range []metadata.Kind{metadata.Movie, metadata.Show} {
+		for _, pages := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/pages=%d", kind, pages), func(t *testing.T) {
+				calls := 0
+				p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					if r.URL.Query().Get("page") != "1" {
+						t.Errorf("空结果不应继续翻页: %s", r.URL.Query().Get("page"))
+					}
+					fmt.Fprintf(w, `{"page":1,"total_pages":%d,"total_results":0,"results":[]}`, pages)
+				})
+				got, err := p.Search(context.Background(), metadata.Query{Kind: kind, Title: "Missing"})
+				if !errors.Is(err, metadata.ErrNotFound) || len(got) != 0 || calls != 1 {
+					t.Fatalf("合法空页应返回未找到而非协议错误: got=%+v err=%v calls=%d", got, err, calls)
+				}
+			})
+		}
+	}
+}
+
+func TestMetadataSearchRetainsCandidatesWithEmptyAlternateTitle(t *testing.T) {
+	for _, kind := range []metadata.Kind{metadata.Movie, metadata.Show} {
+		for _, pages := range []int{0, 1} {
+			for _, emptyFirst := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/pages=%d/emptyFirst=%t", kind, pages, emptyFirst), func(t *testing.T) {
+					titles := []string{"中文片名", "English Alias"}
+					if emptyFirst {
+						titles[0], titles[1] = titles[1], titles[0]
+					}
+					var requests []string
+					p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
+						title := r.URL.Query().Get("query")
+						requests = append(requests, title)
+						if title == "English Alias" {
+							fmt.Fprintf(w, `{"page":1,"total_pages":%d,"total_results":0,"results":[]}`, pages)
+							return
+						}
+						fmt.Fprint(w, `{"page":1,"total_pages":1,"total_results":1,"results":[{"id":42,"title":"中文片名","name":"中文片名","original_title":"中文片名","original_name":"中文片名","release_date":"2020-01-01","first_air_date":"2020-01-01"}]}`)
+					})
+					got, err := p.Search(context.Background(), metadata.Query{Kind: kind, Title: titles[0], OriginalTitle: titles[1], Year: 2020})
+					if err != nil || len(got) != 1 || got[0].Ref.ID != "42" || got[0].Ref.Kind != kind || got[0].Title != "中文片名" || got[0].Year != 2020 || !reflect.DeepEqual(requests, titles) {
+						t.Fatalf("合法空别名丢弃或阻止真实候选: got=%+v err=%v requests=%v", got, err, requests)
+					}
+				})
+			}
+		}
 	}
 }
