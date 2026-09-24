@@ -126,6 +126,6 @@ make linux-amd64
 
 [设计与契约](docs/metadata-providers.md) · [整改与验收报告](docs/provider-audit.md)
 
-一次性 CLI、批量分类、整剧取数和受限本地整理的代码已实现；最终完整回归以及 `res.txt`、`res2.txt` 实际样本运行仍待完成。上述文件名只标识待验证的输入清单。此前的受控 HTTP 回放不等于本轮全部代码已通过验收，也不代表真实模型准确率或四种媒体软件实际导入已验证。所选判断服务与通用 LLM 需使用你的账户凭据验证；中文媒体判断效果应按实际样本检查。
+一次性 CLI、批量分类、整剧取数和受限本地整理已合并到主分支，完整 race、vet 与四个平台构建通过。`res.txt`、`res2.txt` 实际样本验收尚未完成，当前进展见 [复验记录](docs/validation-2026-09-24.md)。上述文件名只标识验证输入；受控回归不代表真实模型准确率或四种媒体软件实际导入已验证。所选判断服务与通用 LLM 需使用你的账户凭据验证；中文媒体判断效果应按实际样本检查。
 
 数据来源：[TMDb](https://www.themoviedb.org/) · [TheTVDB](https://thetvdb.com/)。决策协议：[TypeSafe 官方 API](https://docs.typesafe.ai/api)。许可证：[GPL-3.0](LICENSE)。

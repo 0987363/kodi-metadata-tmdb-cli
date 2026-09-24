@@ -57,7 +57,7 @@ XML 规定语法；媒体 NFO 沿用共同约定，但各应用有自己的字�
 
 因此，LLM 从非标准文件名提取出正确季集号，不保证 Kodi 或 Silo 会按这些编号归集。保留原文件名的 `join`、分组坐标换算也有同样边界。这是当前流程必须明确的输入约束，不能仅靠 NFO 字段修复。
 
-基线还存在项目自身入口问题（现已修复）：[扫描代码](../collector/scan.go)只单独派发蓝光目录和普通视频；DVD 的 `VIDEO_TS` 目录及 VOB/IFO 文件被分类为光盘对象，却不走蓝光或普通视频分支。另 [电影路径代码](../movies/process.go)将 DVD 路径再拼接 `VIDEO_TS/VIDEO_TS.nfo`，若传入实际 `VIDEO_TS` 目录会重复一层。现已通过真实目录回归修复扫描和重复路径，提供根目录与索引 NFO；这不代表已经验证各服务器的原盘播放能力。
+基线还存在项目自身入口问题（现已修复）：旧扫描逻辑只单独派发蓝光目录和普通视频，DVD 未进入输出分支；旧电影路径逻辑还会重复拼接 `VIDEO_TS`。当前 [媒体发现](../collector/discovery.go)识别实际原盘结构，[电影路径代码](../movies/process.go)提供根目录与索引 NFO；相关目录回归通过，这不代表已经验证各服务器的原盘播放能力。
 
 ## 4. 字段对照
 
@@ -65,7 +65,7 @@ XML 规定语法；媒体 NFO 沿用共同约定，但各应用有自己的字�
 | --- | --- |
 | `movie`、`tvshow`、`episodedetails` 根元素 | 对应四端已实现的三类 NFO 对象 |
 | `title`、`plot`、日期及常见类型字段 | 基础字段可读取；不同对象有继承或忽略字段，不能要求每种字段在每种对象上都有效 |
-| `uniqueid` | 表示当前 NFO 对象在某网站的记录编号，`type` 表示网站，`default` 标明主引用；当前 `tmdb`、`tvdb` 输出名称正确 |
+| `uniqueid` | 表示当前 NFO 对象在指定命名空间的标识，`type` 表示网站或本地命名空间，`default` 标明主引用；`tmdb`、`tvdb` 是网站编号，`local` 是程序生成的本地标识，不是网站编号 |
 | 电影/节目网站编号 | 四端均有对应读取映射 |
 | 单集网站编号 | Kodi、Jellyfin、Emby 有读取路径；Silo 虽在 XML 解析结构中读取，但其 `GetEpisodes` 没有把这些编号复制到返回结果，不能宣称保留 |
 | `runtime` | 四端有分钟级读取或说明；基线只映射单集，现已补齐电影的来源标称时长 |
@@ -108,3 +108,18 @@ XML 规定语法；媒体 NFO 沿用共同约定，但各应用有自己的字�
 - 未执行：Kodi、Jellyfin、Emby、Silo 的服务器运行、数据库导入、界面展示和播放验证，符合用户限定的核查方式。
 - 已修改：项目内写入映射、图片命名、原盘和媒体根处理；未修改真实媒体、服务器配置或系统软件。
 - 当前统一设计见 [优化方案](metadata-providers.md)。本报告替代笼统的“四端字段尚未核查”描述，并区分已修复的生成端问题与仍存在的读取端能力差异。
+
+## 8. 本地 AI 整理结果的读取边界
+
+2026-09-24，在合并后的主分支调用实际 `nfo.Write` 生成本地 movie、tvshow、episodedetails 三类格式样本，并重新解析 XML。中文及特殊字符、唯一的 `type="local"` 主标识、特别篇零季均通过；未提供的演员、日期、时长、评分条目、图片和网站编号没有生成。现有电影和剧集任务测试另覆盖 `Task.Local` 到实际写入的链路。合成样本只验证格式，不证明真实模型判断正确。
+
+`local` 表示本工具的本地条目命名空间；其值由程序按对象类型与路径身份计算，不来自模型，也不能用于查询 TMDb 或 TheTVDB。
+
+| 软件 | 对本地唯一标识的已核实行为 |
+| --- | --- |
+| Kodi | 官方文档允许非网站作品使用自定义类型及字母数字值，当前 local 标识符合此规则 |
+| Jellyfin | 已核查的解析器将未知 type 交给 `TrySetProviderId`，不会仅因 local 类型拒绝基本元数据解析；此处不外推数据库或界面行为 |
+| Emby | 已核查的 NFO 插件将有效且非空的未知 type 交给 `SetProviderId`，当前摘要值通过其非零值检查；不外推其他插件版本 |
+| Silo | `applyUniqueIDs` 仅映射 imdb、tmdb/themoviedb、tvdb，忽略 local；标题、简介、明确季集仍走独立读取分支，因此不能声称 Silo 保存了本地标识 |
+
+依据：[Kodi 自定义标识](https://kodi.wiki/view/NFO_files/TV_shows#nfo_Tags)、[Jellyfin uniqueid 分支](https://github.com/jellyfin/jellyfin/blob/208c278b75abd897aefa1e1175126eac5e4dbfaa/MediaBrowser.XbmcMetadata/Parsers/BaseNfoParser.cs#L607)、[Emby uniqueid 分支](https://github.com/MediaBrowser/NfoMetadata/blob/965f602939810b845a08548fe96ff10667762633/NfoMetadata/Parsers/BaseNfoParser.cs#L368)、[Silo 标识映射](https://github.com/Silo-Server/silo-server/blob/d4e35ba9df416e747822c6c9f2193b89c6b7e9fb/internal/metadata/nfo/nfo.go#L466)。本轮仍按用户要求只检查官方文档、源码和输出格式，未部署四种服务器。

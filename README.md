@@ -84,6 +84,6 @@ go vet ./...
 make linux-amd64
 ```
 
-The implementation is present, while full final regression and the actual `res.txt` / `res2.txt` sample runs remain pending. Those filenames identify validation inputs, not production classification rules. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit/verification boundaries](docs/provider-audit.md). Controlled HTTP tests establish contracts and behavior; they do not establish real model accuracy on your media library or actual server import.
+The merged implementation passed full race tests, vet and four platform builds. Actual `res.txt` / `res2.txt` sample acceptance is still in progress; see the [current validation record](docs/validation-2026-09-24.md). Those filenames identify validation inputs, not production classification rules. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit/verification boundaries](docs/provider-audit.md). Controlled HTTP tests establish contracts and behavior; they do not establish real model accuracy on your media library or actual server import.
 
 Sources: [TMDb](https://www.themoviedb.org/), [TheTVDB](https://thetvdb.com/), [TypeSafe API](https://docs.typesafe.ai/api). [GPL-3.0](LICENSE).
