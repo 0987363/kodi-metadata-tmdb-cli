@@ -37,6 +37,18 @@ func (p *testProvider) Fetch(ctx context.Context, r Request) (*Record, error) {
 	return &Record{Ref: ref, Title: p.name, SeasonNumber: r.Season, EpisodeNumber: r.Episode}, nil
 }
 
+func (p *testProvider) FetchSeries(ctx context.Context, req SeriesRequest) (*SeriesResult, error) {
+	p.fetchCalls++
+	if p.fetchError != nil {
+		return nil, p.fetchError
+	}
+	result := &SeriesResult{Work: &Record{Ref: req.Ref, Title: p.name}}
+	for _, key := range UniqueEpisodeKeys(req.Episodes) {
+		result.Episodes = append(result.Episodes, SeriesEpisode{Key: key, Record: &Record{Ref: Ref{Provider: p.name, Kind: Episode, ID: req.Ref.ID + "-episode"}, Title: p.name, SeasonNumber: key.Season, EpisodeNumber: key.Episode}})
+	}
+	return result, nil
+}
+
 type testJudge struct {
 	calls, index int
 	seen         []Option
@@ -52,11 +64,11 @@ func TestResolveStopsAfterFirstSourceConfirmation(t *testing.T) {
 	a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 	judge := &testJudge{index: 0}
 	m := NewManager([]Provider{a, b}, time.Hour, judge)
-	got, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Season: 0, Episode: 2}, t.TempDir())
+	got, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 0, Episode: 2}}}, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if judge.calls != 1 || len(judge.seen) != 1 || got.Work.Ref.Provider != "tmdb" || got.Episode.Ref.Provider != "tmdb" || got.Episode.Ref.Kind != Episode || got.Episode.SeasonNumber != 0 {
+	if judge.calls != 1 || len(judge.seen) != 1 || got.Work.Ref.Provider != "tmdb" || got.Episodes[0].Record.Ref.Provider != "tmdb" || got.Episodes[0].Record.Ref.Kind != Episode || got.Episodes[0].Record.SeasonNumber != 0 {
 		t.Fatalf("候选与单集未整体选择：%+v %+v", got, judge)
 	}
 	if a.searchCalls != 1 || b.searchCalls != 0 || a.fetchCalls != 2 || b.fetchCalls != 0 {
@@ -67,12 +79,12 @@ func TestResolveKnownIDsSkipSearchAndStopAfterConfirmation(t *testing.T) {
 	a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 	j := new(testJudge)
 	m := NewManager([]Provider{a, b}, time.Hour, j)
-	req := Request{Kind: Show, Hints: []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}, {Provider: "thetvdb", Kind: Show, ID: "22"}}}
+	req := Request{Kind: Show, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}, Hints: []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}, {Provider: "thetvdb", Kind: Show, ID: "22"}}}
 	got, err := m.Resolve(context.Background(), req, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.searchCalls != 0 || b.searchCalls != 0 || a.fetchCalls != 1 || b.fetchCalls != 0 || j.calls != 1 || got.Work.Ref.ID != "11" {
+	if a.searchCalls != 0 || b.searchCalls != 0 || a.fetchCalls != 2 || b.fetchCalls != 0 || j.calls != 1 || got.Work.Ref.ID != "11" {
 		t.Fatalf("编号直取被跳过：%+v %+v %+v", a, b, j)
 	}
 }
@@ -80,7 +92,7 @@ func TestResolveManualSourceConstrainsHintsAndJudgesSingleCandidate(t *testing.T
 	a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 	j := new(testJudge)
 	m := NewManager([]Provider{a, b}, time.Hour, j)
-	req := Request{Kind: Show, Ref: Ref{Provider: "thetvdb", Kind: Show}, Hints: []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}, {Provider: "thetvdb", Kind: Show, ID: "22"}}}
+	req := Request{Kind: Show, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}, Ref: Ref{Provider: "thetvdb", Kind: Show}, Hints: []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}, {Provider: "thetvdb", Kind: Show, ID: "22"}}}
 	got, err := m.Resolve(context.Background(), req, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +106,7 @@ func TestResolveCachesSourceDataButAlwaysJudges(t *testing.T) {
 	j := new(testJudge)
 	m := NewManager([]Provider{p}, time.Hour, j)
 	root := t.TempDir()
-	req := Request{Kind: Show, Query: Query{Title: "作品"}, Season: 1, Episode: 2}
+	req := Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}
 	for range 2 {
 		if _, err := m.Resolve(context.Background(), req, root); err != nil {
 			t.Fatal(err)
@@ -103,7 +115,7 @@ func TestResolveCachesSourceDataButAlwaysJudges(t *testing.T) {
 	if p.searchCalls != 1 || p.fetchCalls != 2 || j.calls != 2 {
 		t.Fatalf("数据缓存或Jev阶段错误：%+v %+v", p, j)
 	}
-	req.Group = "new-group"
+	req.Episodes[0].Group = "new-group"
 	if _, err := m.Resolve(context.Background(), req, root); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +159,7 @@ func TestResolveCancellationAndNoResults(t *testing.T) {
 	if _, err := m.Resolve(ctx, Request{Kind: Show}, t.TempDir()); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if _, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "missing"}}, t.TempDir()); !errors.Is(err, ErrNotFound) || j.calls != 0 {
+	if _, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "missing"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir()); !errors.Is(err, ErrNoMatch) || j.calls != 0 {
 		t.Fatalf("空候选处理错误：%v", err)
 	}
 }

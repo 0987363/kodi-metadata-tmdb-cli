@@ -22,13 +22,13 @@ const acceptedResponse = `{"model":"jev-1.13.0","answers":{"select":{"type":"cho
 
 func candidateOptions() []metadata.Option {
 	return []metadata.Option{
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02", Actors: []metadata.Actor{{Name: "不应发送的演员"}}, Artwork: []metadata.Artwork{{URL: "https://image.example/should-not-send.jpg"}}}, Episode: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "100"}, Title: "试播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}},
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02"}, Episode: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "100"}, Title: "試播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}},
+		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02", Actors: []metadata.Actor{{Name: "不应发送的演员"}}, Artwork: []metadata.Artwork{{URL: "https://image.example/should-not-send.jpg"}}}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "100"}, Title: "试播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}}, {Key: metadata.EpisodeKey{Season: 1, Episode: 1}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "101"}, Title: "第一集", SeasonNumber: 1, EpisodeNumber: 1}}}},
+		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02"}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "100"}, Title: "試播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}}, {Key: metadata.EpisodeKey{Season: 1, Episode: 1}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "101"}, Title: "第一集", SeasonNumber: 1, EpisodeNumber: 1}}}},
 	}
 }
 
 func sourceRequest() metadata.Request {
-	return metadata.Request{Path: "/library/同名节目/Season 0", Filename: "Original.Show.S00E02.mkv", Kind: metadata.Show, Query: metadata.Query{Kind: metadata.Show, Title: "同名节目", OriginalTitle: "Original Show", Year: 2020}, EpisodeTitle: "试播集", Season: 0, Episode: 2, Group: "aired", Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Hints: []metadata.Ref{{Provider: "tmdb", Kind: metadata.Show, ID: "42"}}}
+	return metadata.Request{Path: "/library/同名节目", Files: []string{"Season 0/Original.Show.S00E02.mkv", "Season 1/Original.Show.S01E01.mkv"}, Kind: metadata.Show, Query: metadata.Query{Kind: metadata.Show, Title: "同名节目", OriginalTitle: "Original Show", Year: 2020}, Episodes: []metadata.EpisodeKey{{Season: 0, Episode: 2}, {Season: 1, Episode: 1}}, Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Hints: []metadata.Ref{{Provider: "tmdb", Kind: metadata.Show, ID: "42"}}}
 }
 
 func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
@@ -46,8 +46,8 @@ func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
 			t.Error(err)
 		}
 		var request struct {
-			Model     string           `json:"model"`
-			State     metadata.Request `json:"state"`
+			Model     string                 `json:"model"`
+			State     metadata.JudgmentInput `json:"state"`
 			Questions map[string]struct {
 				Type         string                     `json:"type"`
 				Instructions json.RawMessage            `json:"instructions"`
@@ -58,7 +58,7 @@ func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Error(err)
 		}
-		if request.Model != "jev-latest" || request.State.Filename != "Original.Show.S00E02.mkv" || request.State.Ref.Provider != "thetvdb" || request.State.Group != "aired" || request.State.Episode != 2 || len(request.State.Hints) != 1 {
+		if request.Model != "jev-latest" || len(request.State.Files) != 2 || len(request.State.Episodes) != 2 || request.State.Episodes[0].Season != 0 || request.State.Episodes[1].Episode != 1 || request.State.Ref.Provider != "thetvdb" || len(request.State.Hints) != 1 {
 			t.Errorf("模型或输入证据错误: %#v", request)
 		}
 		if !strings.Contains(string(body), `"season":0`) {
@@ -77,16 +77,19 @@ func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
 					Source, ID, Title, Plot, Premiered string
 					OriginalTitle                      string `json:"original_title"`
 				} `json:"work"`
-				Episode struct {
-					Source        string
-					SeasonNumber  *int `json:"season_number"`
-					EpisodeNumber int  `json:"episode_number"`
-				} `json:"episode"`
+				Episodes []struct {
+					Requested metadata.EpisodeKey `json:"requested"`
+					Record    struct {
+						Source        string
+						SeasonNumber  *int `json:"season_number"`
+						EpisodeNumber int  `json:"episode_number"`
+					} `json:"record"`
+				} `json:"episodes"`
 			}
 			if err := json.Unmarshal(selectQuestion.Criteria[fmt.Sprintf("c%d", i)], &evidence); err != nil {
 				t.Error(err)
 			}
-			if evidence.Work.Source != source || evidence.Work.ID != "42" || evidence.Work.Title != "同名节目" || evidence.Work.OriginalTitle != "Original Show" || evidence.Work.Plot != "节目介绍" || evidence.Work.Premiered != "2020-01-02" || evidence.Episode.Source != source || evidence.Episode.SeasonNumber == nil || *evidence.Episode.SeasonNumber != 0 || evidence.Episode.EpisodeNumber != 2 {
+			if evidence.Work.Source != source || evidence.Work.ID != "42" || evidence.Work.Title != "同名节目" || evidence.Work.OriginalTitle != "Original Show" || evidence.Work.Plot != "节目介绍" || evidence.Work.Premiered != "2020-01-02" || len(evidence.Episodes) != 2 || evidence.Episodes[0].Record.Source != source || evidence.Episodes[0].Record.SeasonNumber == nil || *evidence.Episodes[0].Record.SeasonNumber != 0 || evidence.Episodes[0].Requested.Episode != 2 || evidence.Episodes[1].Requested.Season != 1 || evidence.Episodes[1].Record.EpisodeNumber != 1 {
 				t.Errorf("候选来源或精简事实丢失: %#v", evidence)
 			}
 			match := request.Questions[fmt.Sprintf("match_%d", i)]

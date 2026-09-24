@@ -6,7 +6,7 @@ type Config struct {
 	TheTVDB   *TheTVDBConfig   `json:"thetvdb"`
 	Log       *LogConfig       `json:"log"`       // 日志配置
 	Tmdb      *TmdbConfig      `json:"tmdb"`      // TMDB 配置
-	Collector *CollectorConfig `json:"collector"` // 目录扫描与监听配置
+	Collector *CollectorConfig `json:"collector"` // 文件发现过滤配置
 }
 
 type LogConfig struct {
@@ -27,16 +27,9 @@ type TmdbConfig struct {
 }
 
 type CollectorConfig struct {
-	RunMode      int      `json:"run_mode"`       // 运行模式：1 daemon，2 once，3 spec
-	Watcher      bool     `json:"watcher"`        // 是否开启文件监听
-	CronSeconds  int      `json:"cron_seconds"`   // 定时扫描频率
-	CronScan     bool     `json:"cron_scan"`      // 是否开启定时扫描
-	CronScanBoot bool     `json:"cron_scan_boot"` // 守护进程模式启动后立即执行一次扫描
-	TmpSuffix    []string `json:"tmp_suffix"`     // 临时文件后缀列表
-	SkipFolders  []string `json:"skip_folders"`   // 跳过目录，可多个
-	SkipKeywords []string `json:"skip_keywords"`  // 跳过文件名中的关键字，可多个
-	MoviesDir    []string `json:"movies_dir"`     // 电影文件根目录，可多个
-	ShowsDir     []string `json:"shows_dir"`      // 电视剧文件根目录，可多个
+	TmpSuffix    []string `json:"tmp_suffix"`    // 临时文件后缀列表
+	SkipFolders  []string `json:"skip_folders"`  // 跳过目录，可多个
+	SkipKeywords []string `json:"skip_keywords"` // 跳过文件名中的关键字，可多个
 }
 
 type NfoField struct {

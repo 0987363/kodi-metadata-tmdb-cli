@@ -8,26 +8,15 @@ type MediaFile struct {
 	Filename  string    // 文件名
 	Suffix    string    // 后缀
 	MediaType MediaType // 文件类型
-	VideoType VideoType // 视频类型
-	TaskType  TaskType  // 任务类型
 }
 
 type (
-	VideoType int
 	MediaType int
-	TaskType  int
-)
-
-const (
-	Movies VideoType = iota + 1
-	TvShows
 )
 
 const (
 	UNKNOWN MediaType = iota
 	VIDEO
-	TRAILER
-	SAMPLE
 	AUDIO
 	SUBTITLE
 	NFO
@@ -47,7 +36,6 @@ const (
 	SEASON_THUMB
 	EXTRAFANART
 	EXTRATHUMB
-	EXTRA
 	GRAPHIC
 	MEDIAINFO
 	VSMETA
@@ -56,19 +44,11 @@ const (
 	DOUBLE_EXT
 )
 
-const (
-	TaskScan    TaskType = iota + 1 // 来自全量扫描
-	TaskSpec                        // 来自指定目录扫描
-	TaskWatcher                     // 来自实时监听
-)
-
 var (
 	VideoTsType      = "video_ts"
 	BDMVType         = "bdmv"
 	HvdvdType        = "hdvd_ts"
 	DVDType          = "dvd"
-	ExtrasType       = "extras"
-	ExtraType        = "extra"
 	NfoType          = ".nfo"
 	ArtworkFileTypes = []string{
 		".jpg", ".jpeg,", ".png", ".tbn", ".gif", ".bmp", ".webp",

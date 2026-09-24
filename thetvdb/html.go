@@ -91,7 +91,7 @@ func parseAllSeasons(doc *html.Node, sourceURL, slug string) ([]episodeEntry, er
 		return nil, fmt.Errorf("TheTVDB 全集页面结构或地址不匹配")
 	}
 	var entries []episodeEntry
-	seen := make(map[string]bool)
+	seen := make(map[string]episodeEntry)
 	for _, li := range nodes(doc, func(n *html.Node) bool { return n.Data == "li" && hasClass(n, "list-group-item") }) {
 		labels := nodes(li, func(n *html.Node) bool { return hasClass(n, "episode-label") })
 		if len(labels) == 0 {
@@ -111,10 +111,6 @@ func parseAllSeasons(doc *html.Node, sourceURL, slug string) ([]episodeEntry, er
 		if !strings.HasPrefix(link.Path, prefix) || !positiveID(identity) {
 			return nil, fmt.Errorf("TheTVDB 单集链接不属于当前节目")
 		}
-		if seen[identity] {
-			continue
-		}
-		seen[identity] = true
 		season, err := strconv.Atoi(parts[1])
 		if err != nil {
 			return nil, fmt.Errorf("TheTVDB 季编号: %w", err)
@@ -124,11 +120,19 @@ func parseAllSeasons(doc *html.Node, sourceURL, slug string) ([]episodeEntry, er
 			return nil, fmt.Errorf("TheTVDB 集编号无效")
 		}
 		entry := episodeEntry{id: identity, season: season, number: number, title: textContent(links[0]), url: link.String()}
+		if prior, ok := seen[identity]; ok {
+			if prior.season != season || prior.number != number {
+				return nil, fmt.Errorf("TheTVDB 全集单集编号对应多个坐标")
+			}
+			continue
+		}
+		seen[identity] = entry
 		for _, list := range nodes(li, func(n *html.Node) bool { return hasClass(n, "list-inline") }) {
 			for _, item := range nodes(list, func(n *html.Node) bool { return n.Data == "li" }) {
 				if parsed := date(textContent(item)); parsed != "" {
 					entry.aired = parsed
-					break
+				} else if entry.network == "" {
+					entry.network = textContent(item)
 				}
 			}
 		}
@@ -136,6 +140,12 @@ func parseAllSeasons(doc *html.Node, sourceURL, slug string) ([]episodeEntry, er
 			paragraphs := nodes(overview, func(n *html.Node) bool { return n.Data == "p" })
 			if len(paragraphs) > 0 {
 				entry.plot = textContent(paragraphs[0])
+			}
+		}
+		for _, image := range nodes(li, func(n *html.Node) bool { return n.Data == "img" }) {
+			if thumb := artworkURL(attr(image, "data-src")); thumb != "" {
+				entry.thumb = thumb
+				break
 			}
 		}
 		entries = append(entries, entry)

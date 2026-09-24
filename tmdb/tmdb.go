@@ -9,7 +9,6 @@ const (
 	ApiSearchTv       = "/3/search/tv"
 	ApiSearchMovie    = "/3/search/movie"
 	ApiTvDetail       = "/3/tv/%d"
-	ApiTvEpisode      = "/3/tv/%d/season/%d/episode/%d"
 	ApiTvEpisodeGroup = "/3/tv/episode_group/%s"
 	ApiMovieDetail    = "/3/movie/%d"
 )

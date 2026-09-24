@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fengqi/kodi-metadata-tmdb-cli/common/httpx"
@@ -18,8 +19,13 @@ import (
 )
 
 type metadataProvider struct {
-	config config.TmdbConfig
-	client *http.Client
+	config       config.TmdbConfig
+	client       *http.Client
+	seriesGate   chan struct{}
+	seriesShows  map[int]*seriesFacts
+	seriesGroups map[string]*TvEpisodeGroupDetail
+	statsMu      sync.Mutex
+	stats        metadata.SourceStats
 }
 
 var _ metadata.Provider = (*metadataProvider)(nil)
@@ -35,10 +41,18 @@ func NewMetadataProvider(c *config.TmdbConfig) metadata.Provider {
 		settings.TimeoutSeconds = 30
 	}
 	settings.RetryCount = max(0, settings.RetryCount)
-	return &metadataProvider{config: settings, client: httpx.NewClient(settings.Proxy, settings.TimeoutSeconds)}
+	client := httpx.NewClient(settings.Proxy, settings.TimeoutSeconds)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &metadataProvider{config: settings, client: client, seriesGate: make(chan struct{}, 1)}
 }
 
 func (p *metadataProvider) Name() string { return "tmdb" }
+
+func (p *metadataProvider) Statistics() metadata.SourceStats {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	return p.stats
+}
 
 func (p *metadataProvider) Scope() string {
 	data, _ := json.Marshal(struct {
@@ -51,7 +65,7 @@ func (p *metadataProvider) Scope() string {
 }
 
 func (p *metadataProvider) Supports(kind metadata.Kind) bool {
-	return kind == metadata.Movie || kind == metadata.Show || kind == metadata.Episode
+	return kind == metadata.Movie || kind == metadata.Show
 }
 
 func (p *metadataProvider) requestJSON(ctx context.Context, path string, args url.Values, target any) error {
@@ -66,7 +80,7 @@ func (p *metadataProvider) requestJSON(ctx context.Context, path string, args ur
 	args.Set("language", p.config.Language)
 	endpoint.RawQuery = args.Encode()
 	for attempt := 0; ; attempt++ {
-		body, requestErr := p.requestOnce(ctx, endpoint.String())
+		body, requestErr := p.requestOnce(ctx, endpoint.String(), attempt > 0)
 		if requestErr == nil {
 			if err := json.Unmarshal(body, target); err != nil {
 				return fmt.Errorf("解析 TMDb %s 响应：%w", path, err)
@@ -99,11 +113,22 @@ func (p *metadataProvider) requestJSON(ctx context.Context, path string, args ur
 	}
 }
 
-func (p *metadataProvider) requestOnce(ctx context.Context, endpoint string) ([]byte, error) {
+func (p *metadataProvider) requestOnce(ctx context.Context, endpoint string, retry bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, errors.New("TMDb 请求地址无效")
 	}
+	p.statsMu.Lock()
+	p.stats.HTTPAttempts++
+	if retry {
+		p.stats.Retries++
+	}
+	if strings.HasPrefix(req.URL.Path, "/3/search/") {
+		p.stats.SearchRequests++
+	} else if suffix, ok := strings.CutPrefix(req.URL.Path, "/3/tv/"); ok && suffix != "" && !strings.Contains(suffix, "/") && req.URL.Query().Get("append_to_response") != "" {
+		p.stats.BatchRequests++
+	}
+	p.statsMu.Unlock()
 	resp, err := p.client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -140,11 +165,7 @@ func (p *metadataProvider) Fetch(ctx context.Context, req metadata.Request) (*me
 	if !p.Supports(req.Kind) {
 		return nil, metadata.ErrUnsupported
 	}
-	expectedKind := req.Kind
-	if req.Kind == metadata.Episode {
-		expectedKind = metadata.Show
-	}
-	if req.Ref.Provider != p.Name() || req.Ref.Kind != expectedKind {
+	if req.Ref.Provider != p.Name() || req.Ref.Kind != req.Kind {
 		return nil, errors.New("TMDb 引用的数据源或对象类型不匹配")
 	}
 	id, err := strconv.Atoi(req.Ref.ID)
@@ -157,9 +178,6 @@ func (p *metadataProvider) Fetch(ctx context.Context, req metadata.Request) (*me
 		}
 		return p.fetchMovie(ctx, id)
 	}
-	if req.Kind == metadata.Episode && (req.Season < 0 || req.Episode <= 0) {
-		return nil, errors.New("TMDb 单集季集号无效")
-	}
 	var group *TvEpisodeGroupDetail
 	if req.Group != "" {
 		group, err = p.fetchGroup(ctx, req.Group, id)
@@ -167,10 +185,7 @@ func (p *metadataProvider) Fetch(ctx context.Context, req metadata.Request) (*me
 			return nil, err
 		}
 	}
-	if req.Kind == metadata.Show {
-		return p.fetchShow(ctx, id, group)
-	}
-	return p.fetchEpisode(ctx, id, req, group)
+	return p.fetchShow(ctx, id, group)
 }
 
 func (p *metadataProvider) fetchMovie(ctx context.Context, id int) (*metadata.Record, error) {
@@ -212,29 +227,6 @@ func (p *metadataProvider) fetchShow(ctx context.Context, id int, group *TvEpiso
 		}
 		record.Artwork = artwork
 	}
-	return record, nil
-}
-
-func (p *metadataProvider) fetchEpisode(ctx context.Context, showID int, req metadata.Request, group *TvEpisodeGroupDetail) (*metadata.Record, error) {
-	season, episode := req.Season, req.Episode
-	expectedID := 0
-	if group != nil {
-		member, err := groupedEpisode(group, season, episode)
-		if err != nil {
-			return nil, err
-		}
-		season, episode, expectedID = member.SeasonNumber, member.EpisodeNumber, member.Id
-	}
-	var detail TvEpisodeDetail
-	args := url.Values{"append_to_response": {"credits,images,external_ids"}}
-	if err := p.requestJSON(ctx, fmt.Sprintf(ApiTvEpisode, showID, season, episode), args, &detail); err != nil {
-		return nil, err
-	}
-	if detail.Id <= 0 || detail.Name == "" || detail.SeasonNumber != season || detail.EpisodeNumber != episode || (detail.ShowID != 0 && detail.ShowID != showID) || (expectedID != 0 && detail.Id != expectedID) {
-		return nil, errors.New("TMDb 单集详情身份与请求不符")
-	}
-	record := p.episodeRecord(&detail, showID)
-	record.SeasonNumber, record.EpisodeNumber = req.Season, req.Episode
 	return record, nil
 }
 

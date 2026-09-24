@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,8 @@ type Manager struct {
 	providers []Provider
 	ttl       time.Duration
 	judge     Judge
+	statsMu   sync.Mutex
+	decisions map[string]int64
 }
 
 func NewManager(providers []Provider, ttl time.Duration, judge Judge) *Manager {
@@ -41,6 +44,16 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 	if req.Episode < 0 || req.Season < 0 || req.Kind == Movie && (req.Episode != 0 || req.Group != "") {
 		return nil, errors.New("请求的媒体类型与季集或分组不一致")
 	}
+	if req.Kind == Show {
+		if len(req.Episodes) == 0 {
+			return nil, errors.New("剧集请求没有单集集合")
+		}
+		for _, key := range req.Episodes {
+			if key.Season < 0 || key.Episode < 1 {
+				return nil, errors.New("剧集请求含未知季集坐标")
+			}
+		}
+	}
 	supported := false
 	for _, p := range m.providers {
 		if err := ctx.Err(); err != nil {
@@ -55,6 +68,9 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 			return nil, ctxErr
 		}
 		if errors.Is(err, ErrNotFound) {
+			if req.Ref.ID != "" || req.Ref.Slug != "" {
+				return nil, fmt.Errorf("人工指定作品未找到: %w", ErrConstraintMismatch)
+			}
 			continue
 		}
 		if err != nil {
@@ -63,6 +79,12 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 		if len(options) == 0 {
 			continue
 		}
+		m.statsMu.Lock()
+		if m.decisions == nil {
+			m.decisions = make(map[string]int64)
+		}
+		m.decisions[p.Name()]++
+		m.statsMu.Unlock()
 		chosen, err := m.judge.Select(ctx, req, options)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -76,12 +98,45 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 		if chosen < 0 || chosen >= len(options) {
 			return nil, errors.New("判断器返回了候选集合之外的选择")
 		}
-		return &options[chosen], nil
+		selected := &options[chosen]
+		if req.Kind == Show {
+			detail, err := m.fetchSeries(ctx, p, SeriesRequest{Ref: selected.Work.Ref, Episodes: req.Episodes, Details: true}, root)
+			if err != nil {
+				return nil, fmt.Errorf("选中节目详情不完整: %w", err)
+			}
+			selected = &Option{Work: detail.Work, Episodes: detail.Episodes}
+		}
+		return selected, nil
 	}
 	if !supported {
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupported, req.Ref.Provider, req.Kind)
 	}
-	return nil, ErrNotFound
+	if req.Ref.ID != "" || req.Ref.Slug != "" {
+		return nil, fmt.Errorf("人工指定作品未被确认: %w", ErrConstraintMismatch)
+	}
+	return nil, ErrNoMatch
+}
+
+func (m *Manager) Statistics() map[string]SourceStats {
+	if m == nil {
+		return nil
+	}
+	result := make(map[string]SourceStats, len(m.providers))
+	for _, provider := range m.providers {
+		stats := SourceStats{}
+		if source, ok := provider.(StatisticsProvider); ok {
+			stats = source.Statistics()
+		}
+		result[provider.Name()] = stats
+	}
+	m.statsMu.Lock()
+	for source, count := range m.decisions {
+		stats := result[source]
+		stats.Decisions = count
+		result[source] = stats
+	}
+	m.statsMu.Unlock()
+	return result
 }
 
 func (m *Manager) sourceOptions(ctx context.Context, p Provider, req Request, root string) ([]Option, error) {
@@ -94,22 +149,21 @@ func (m *Manager) sourceOptions(ctx context.Context, p Provider, req Request, ro
 	}
 	options := make([]Option, 0, len(candidates))
 	for _, candidate := range candidates {
-		work, err := m.fetch(ctx, p, Request{Kind: req.Kind, Ref: candidate.Ref, Group: req.Group}, root)
+		var option Option
+		if req.Kind == Show {
+			series, fetchErr := m.fetchSeries(ctx, p, SeriesRequest{Ref: candidate.Ref, Episodes: req.Episodes}, root)
+			err = fetchErr
+			if err == nil {
+				option = Option{Work: series.Work, Episodes: series.Episodes}
+			}
+		} else {
+			option.Work, err = m.fetch(ctx, p, Request{Kind: Movie, Ref: candidate.Ref}, root)
+		}
 		if (errors.Is(err, ErrNotFound) || errors.Is(err, ErrConstraintMismatch)) && req.Ref.ID == "" && req.Ref.Slug == "" {
 			continue
 		}
 		if err != nil {
 			return nil, err
-		}
-		option := Option{Work: work}
-		if req.Kind == Show && req.Episode > 0 {
-			option.Episode, err = m.fetch(ctx, p, Request{Kind: Episode, Ref: work.Ref, Season: req.Season, Episode: req.Episode, Group: req.Group}, root)
-			if (errors.Is(err, ErrNotFound) || errors.Is(err, ErrConstraintMismatch)) && req.Ref.ID == "" && req.Ref.Slug == "" {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
 		}
 		options = append(options, option)
 	}

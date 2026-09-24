@@ -70,55 +70,6 @@ func TestFetchShowByNumericIDWithoutSearch(t *testing.T) {
 	}
 }
 
-func TestEpisodeOfficialOrderDuplicateAndCache(t *testing.T) {
-	series, all, episode := fixture(t, "series.html"), fixture(t, "allseasons.html"), fixture(t, "episode.html")
-	var allRequests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/series/26882341-show":
-			fmt.Fprint(w, series)
-		case "/series/26882341-show/allseasons/official":
-			allRequests.Add(1)
-			fmt.Fprint(w, all)
-		case "/series/26882341-show/episodes/7407799":
-			fmt.Fprint(w, episode)
-		case "/series/26882341-show/episodes/9000000":
-			fmt.Fprint(w, strings.ReplaceAll(strings.ReplaceAll(episode, "7407799", "9000000"), "探地穴 第二回", "特别篇"))
-		default:
-			t.Errorf("意外请求：%s", r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	provider := New(server.Client(), server.URL, "zh-CN", 0)
-	req := metadata.Request{Kind: metadata.Episode, Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, Slug: "26882341-show"}, Season: 1, Episode: 1}
-	if _, err := provider.Fetch(context.Background(), req); !errors.Is(err, metadata.ErrAmbiguous) {
-		t.Fatalf("不同单集编号应报歧义：%v", err)
-	}
-	req.Episode = 2
-	record, err := provider.Fetch(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if record.Ref.ID != "7407799" || record.Ref.Kind != metadata.Episode || record.SeasonNumber != 1 || record.EpisodeNumber != 2 || record.RuntimeMinutes != 60 || record.Premiered != "" || record.Plot != "用于解析测试的单集详情简介。" {
-		t.Fatalf("单集解析错误：%+v", record)
-	}
-	if len(record.ExternalIDs) != 1 || record.ExternalIDs[0].Type != "tvdb" || record.ExternalIDs[0].Value != "7407799" {
-		t.Fatalf("单集不应继承父节目编号：%+v", record.ExternalIDs)
-	}
-	req.Season, req.Episode = 0, 1
-	record, err = provider.Fetch(context.Background(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if record.Ref.ID != "9000000" || record.SeasonNumber != 0 || record.Premiered != "2016-09-25" {
-		t.Fatalf("特别篇解析错误：%+v", record)
-	}
-	if allRequests.Load() != 1 {
-		t.Fatalf("全集页面应缓存，实际请求%d次", allRequests.Load())
-	}
-}
-
 func TestFetchFailuresRemainDistinct(t *testing.T) {
 	for _, status := range []int{403, 404, 429, 500} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -151,15 +102,14 @@ func TestRejectUnsupportedAndCanceledRequests(t *testing.T) {
 	}
 }
 
-func TestRejectEpisodeIdentityMismatch(t *testing.T) {
-	server := servePages(t, map[string]string{
-		"/series/26882341-show":                     fixture(t, "series.html"),
-		"/series/26882341-show/allseasons/official": fixture(t, "allseasons.html"),
-		"/series/26882341-show/episodes/7407799":    strings.ReplaceAll(fixture(t, "episode.html"), "7407799", "7407787"),
-	})
-	_, err := New(server.Client(), server.URL, "zh-CN", 0).Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: metadata.Ref{Slug: "26882341-show"}, Season: 1, Episode: 2})
-	if err == nil || errors.Is(err, metadata.ErrNotFound) {
-		t.Fatalf("单集身份错配应为结构错误：%v", err)
+func TestFetchEpisodeUnsupportedBeforeNetwork(t *testing.T) {
+	p := New(nil, "http://127.0.0.1:1", "en", 0)
+	if p.Supports(metadata.Episode) {
+		t.Fatal("单集直取不应声明支持")
+	}
+	_, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "371065"}, Season: 1, Episode: 1})
+	if !errors.Is(err, metadata.ErrUnsupported) {
+		t.Fatalf("单集直取应在网络前返回不支持：%v", err)
 	}
 }
 
@@ -205,7 +155,7 @@ func TestRejectOversizedResponse(t *testing.T) {
 
 func TestRejectEmptyAllSeasonsStructure(t *testing.T) {
 	server := servePages(t, map[string]string{"/series/26882341-show": fixture(t, "series.html"), "/series/26882341-show/allseasons/official": "<h1>All Seasons</h1>"})
-	_, err := New(server.Client(), server.URL, "en", 0).Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: metadata.Ref{Slug: "26882341-show"}, Season: 1, Episode: 2})
+	_, err := New(server.Client(), server.URL, "en", 0).FetchSeries(context.Background(), metadata.SeriesRequest{Ref: metadata.Ref{Slug: "26882341-show"}, Episodes: []metadata.EpisodeKey{{Season: 1, Episode: 2}}})
 	if err == nil || errors.Is(err, metadata.ErrNotFound) {
 		t.Fatalf("缺少条目结构不能静默当作未找到：%v", err)
 	}

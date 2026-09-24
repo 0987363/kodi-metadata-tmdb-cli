@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-
-	"github.com/fengqi/lrace"
 )
 
 var (
@@ -18,7 +16,7 @@ var (
 	Collector *CollectorConfig
 )
 
-func LoadConfig(file string, runMode int) {
+func LoadConfig(file string) {
 	// 优先从当前工作目录读取 不存在时回退到可执行文件所在目录
 	if !filepath.IsAbs(file) {
 		if _, err := os.Stat(file); err != nil {
@@ -48,22 +46,11 @@ func LoadConfig(file string, runMode int) {
 	Tmdb = c.Tmdb
 	Collector = c.Collector
 
-	Collector.RunMode = lrace.Ternary(Collector.RunMode == 0, CollectorRunModeDaemon, Collector.RunMode)
-	Collector.RunMode = lrace.Ternary(runMode > 0, runMode, Collector.RunMode)
 	validateConfigEnums()
-	Collector.ShowsDir = clearPath(Collector.ShowsDir)
-	Collector.MoviesDir = clearPath(Collector.MoviesDir)
 }
 
-// validateConfigEnums validates and normalizes configuration enum values for Collector and Log to ensure compatibility.
+// validateConfigEnums 校验并规范化日志配置枚举。
 func validateConfigEnums() {
-	if Collector != nil {
-		if !inIntSet(Collector.RunMode, CollectorRunModeDaemon, CollectorRunModeOnce, CollectorRunModeSpec) {
-			log.Printf("invalid collector.run_mode=%d, fallback to %d", Collector.RunMode, CollectorRunModeDaemon)
-			Collector.RunMode = CollectorRunModeDaemon
-		}
-	}
-
 	if Log != nil {
 		if !inIntSet(Log.Mode, LogModeStdout, LogModeLogfile, LogModeBoth) {
 			log.Printf("invalid log.mode=%d, fallback to %d", Log.Mode, LogModeStdout)
@@ -87,11 +74,4 @@ func validateConfigEnums() {
 
 func inIntSet(val int, set ...int) bool {
 	return slices.Contains(set, val)
-}
-
-func clearPath(name []string) []string {
-	for i, item := range name {
-		name[i] = filepath.Clean(item)
-	}
-	return name
 }

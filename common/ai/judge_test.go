@@ -13,8 +13,8 @@ import (
 
 func judgeOptions() []metadata.Option {
 	return []metadata.Option{
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "First"}},
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "Second", ExternalIDs: []metadata.Identifier{{Type: "tmdb", Value: "99"}}}},
+		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "First"}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "100"}, Title: "Special", SeasonNumber: 0, EpisodeNumber: 2}}}},
+		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "Second", ExternalIDs: []metadata.Identifier{{Type: "tmdb", Value: "99"}}}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "100"}, Title: "Special", SeasonNumber: 0, EpisodeNumber: 2}}}},
 	}
 }
 func TestLLMJudgeSelectsFromActualCandidates(t *testing.T) {
@@ -30,18 +30,20 @@ func TestLLMJudgeSelectsFromActualCandidates(t *testing.T) {
 			return
 		}
 		var prompt struct {
-			Task       string `json:"task"`
+			Task       string                 `json:"task"`
+			Input      metadata.JudgmentInput `json:"input"`
 			Candidates map[string]struct {
 				Work struct {
 					Source, ID  string
 					ExternalIDs []metadata.Identifier `json:"external_ids"`
 				} `json:"work"`
+				Episodes []metadata.EpisodeEvidence `json:"episodes"`
 			} `json:"candidates"`
 		}
 		if err := json.Unmarshal([]byte(body.Messages[1].Content), &prompt); err != nil {
 			t.Error(err)
 		}
-		if prompt.Task != "select_metadata_candidate" || prompt.Candidates["c0"].Work.Source != "tmdb" || prompt.Candidates["c1"].Work.Source != "thetvdb" || len(prompt.Candidates["c1"].Work.ExternalIDs) != 1 {
+		if prompt.Task != "select_metadata_candidate" || len(prompt.Input.Files) != 2 || len(prompt.Input.Episodes) != 1 || prompt.Input.Episodes[0].Season != 0 || prompt.Candidates["c0"].Work.Source != "tmdb" || prompt.Candidates["c1"].Work.Source != "thetvdb" || len(prompt.Candidates["c1"].Work.ExternalIDs) != 1 || len(prompt.Candidates["c1"].Episodes) != 1 || prompt.Candidates["c1"].Episodes[0].Record.Source != "thetvdb" || prompt.Candidates["c1"].Episodes[0].Key.Episode != 2 {
 			t.Errorf("判断证据不完整：%+v", prompt)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": `{"choice":"c1"}`}}}})
@@ -51,9 +53,12 @@ func TestLLMJudgeSelectsFromActualCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := NewJudge(client).Select(context.Background(), metadata.Request{Kind: metadata.Show}, judgeOptions())
+	got, err := NewJudge(client).Select(context.Background(), metadata.Request{Kind: metadata.Show, Files: []string{"Special-v1.mkv", "Special-v2.mkv"}, Episodes: []metadata.EpisodeKey{{Season: 0, Episode: 2}}}, judgeOptions())
 	if err != nil || got != 1 {
 		t.Fatalf("相同数值不同来源的候选混淆：%d %v", got, err)
+	}
+	if client.Stats().DecisionRequests != 1 {
+		t.Fatalf("判断请求计数=%+v", client.Stats())
 	}
 }
 func TestLLMJudgeRejectsNoneAndInvalidChoices(t *testing.T) {

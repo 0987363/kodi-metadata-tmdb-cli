@@ -14,6 +14,7 @@ const (
 )
 
 var (
+	ErrNoMatch            = errors.New("所有适用来源正常完成但未确认匹配")
 	ErrConstraintMismatch = errors.New("候选不满足人工约束")
 	ErrNotFound           = errors.New("未找到元数据")
 	ErrAmbiguous          = errors.New("元数据匹配存在歧义")
@@ -45,16 +46,18 @@ type Candidate struct {
 	Year          int    `json:"year,omitempty"`
 }
 type Request struct {
-	Path         string `json:"path,omitempty"`
-	Filename     string `json:"filename,omitempty"`
-	Hints        []Ref  `json:"hints,omitempty"` // 通用 LLM 提供的各来源作品定位提示
-	EpisodeTitle string `json:"episode_title,omitempty"`
-	Kind         Kind   `json:"kind"`
-	Ref          Ref    `json:"ref"`
-	Query        Query  `json:"query"`
-	Season       int    `json:"season,omitempty"`
-	Episode      int    `json:"episode,omitempty"`
-	Group        string `json:"group,omitempty"`
+	Episodes     []EpisodeKey `json:"episodes,omitempty"`
+	Files        []string     `json:"files,omitempty"`
+	Path         string       `json:"path,omitempty"`
+	Filename     string       `json:"filename,omitempty"`
+	Hints        []Ref        `json:"hints,omitempty"` // 通用 LLM 提供的各来源作品定位提示
+	EpisodeTitle string       `json:"episode_title,omitempty"`
+	Kind         Kind         `json:"kind"`
+	Ref          Ref          `json:"ref"`
+	Query        Query        `json:"query"`
+	Season       int          `json:"season,omitempty"`
+	Episode      int          `json:"episode,omitempty"`
+	Group        string       `json:"group,omitempty"`
 }
 
 // Record 保存单一对象的事实；单集的 ExternalIDs 不包含父节目的编号。
@@ -118,8 +121,8 @@ type Provider interface {
 
 // Option 将节目与目标单集绑定为一个来源候选，电影只包含 Work。
 type Option struct {
-	Work    *Record `json:"work"`
-	Episode *Record `json:"episode,omitempty"`
+	Episodes []SeriesEpisode `json:"episodes,omitempty"`
+	Work     *Record         `json:"work"`
 }
 
 // Judge 只能返回本次候选集合中的序位；不生成或替换元数据。

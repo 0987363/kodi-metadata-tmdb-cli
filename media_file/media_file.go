@@ -1,58 +1,32 @@
 package media_file
 
 import (
-	"fengqi/kodi-metadata-tmdb-cli/config"
 	"fengqi/kodi-metadata-tmdb-cli/utils"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
-var (
-	trailerCompile, _ = regexp.Compile("(?i).*[\\[\\]\\(\\)_.-]+trailer[\\[\\]\\(\\)_.-]?(\\d)*$")
-	sampleCompile, _  = regexp.Compile("(?i).*[\\[\\]\\(\\)_.-]+sample[\\[\\]\\(\\)_.-]?$")
-	dvdCompile, _     = regexp.Compile("(video_ts|vts_\\d\\d_\\d)\\.(vob|bup|ifo)")
-	bluRayCompile, _  = regexp.Compile("(index\\.bdmv|movieobject\\.bdmv|\\d{5}\\.m2ts|\\d{5}\\.clpi|\\d{5}\\.mpls)")
-)
-
 // NewMediaFile 实例化媒体类型
-func NewMediaFile(path, filename string, videoType VideoType) *MediaFile {
+func NewMediaFile(path, filename string) *MediaFile {
 	path = utils.NormalizePath(path)
 
-	if filename[0:1] == "." {
+	if strings.HasPrefix(filename, ".") || filename == "" {
 		return nil
-	}
-
-	taskType := TaskWatcher
-	switch config.Collector.RunMode {
-	case config.CollectorRunModeSpec:
-		taskType = TaskSpec
-	case config.CollectorRunModeDaemon, config.CollectorRunModeOnce:
-		taskType = TaskScan
 	}
 
 	return &MediaFile{
 		Path:      path,
 		Dir:       filepath.Dir(path),
 		Filename:  filename,
-		MediaType: parseMediaType(path, filename),
-		VideoType: videoType,
+		MediaType: parseMediaType(filename),
 		Suffix:    filepath.Ext(filename),
-		TaskType:  taskType,
 	}
 }
 
 // MediaType 解析文件类型
-func parseMediaType(pathname, filename string) MediaType {
-	pathname = strings.ToLower(pathname)
+func parseMediaType(filename string) MediaType {
 	filename = strings.ToLower(filename)
-	folderName := filepath.Base(pathname)
 	ext := filepath.Ext(filename)
-	basename := strings.Replace(filename, ext, "", 1)
-
-	if strings.EqualFold(folderName, ExtrasType) || strings.EqualFold(folderName, ExtraType) {
-		return EXTRA
-	}
 
 	if strings.EqualFold(ext, NfoType) {
 		return NFO
@@ -77,60 +51,15 @@ func parseMediaType(pathname, filename string) MediaType {
 		}
 	}
 
-	if isDiscFile(filename, pathname) {
+	if filename == VideoTsType || filename == BDMVType || filename == HvdvdType || filename == DVDType {
 		return DISC
 	}
 
 	for _, v := range VideoFileTypes {
 		if strings.HasSuffix(filename, v) {
-			if strings.EqualFold(basename, "movie-trailer") ||
-				strings.EqualFold(folderName, "trailer") ||
-				strings.EqualFold(folderName, "trailers") ||
-				trailerCompile.FindString(basename) != "" {
-				return TRAILER
-			}
-
-			if strings.EqualFold(basename, "sample") ||
-				strings.EqualFold(folderName, "sample") ||
-				sampleCompile.FindString(basename) != "" {
-				return SAMPLE
-			}
-
 			return VIDEO
 		}
 	}
 
-	if isDiscFile(filename, folderName) {
-		return VIDEO
-	}
-
 	return UNKNOWN
-}
-
-// 是否是光盘文件
-func isDiscFile(filename, path string) bool {
-	return isDVDFile(filename, path) || isBluRayFile(filename, path) || isHDDVDFile(filename, path)
-}
-
-// 是否是DVD光盘文件
-func isDVDFile(filename, path string) bool {
-	if strings.EqualFold(filename, VideoTsType) || utils.EndsWith(path, VideoTsType) {
-		return true
-	}
-
-	return dvdCompile.FindString(filename) != ""
-}
-
-// 是否是蓝光文件
-func isBluRayFile(filename, path string) bool {
-	if strings.EqualFold(filename, BDMVType) || utils.EndsWith(path, BDMVType) {
-		return true
-	}
-
-	return bluRayCompile.FindString(filename) != ""
-}
-
-// 是否是HD DVD文件
-func isHDDVDFile(filename, path string) bool {
-	return strings.EqualFold(filename, HvdvdType) || utils.EndsWith(path, HvdvdType)
 }

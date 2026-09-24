@@ -29,6 +29,10 @@ type Provider struct {
 	nextRequest time.Time
 	cacheMu     sync.Mutex
 	seasons     map[string]*seasonCache
+	seriesMu    sync.Mutex
+	seriesPages map[string]*seriesPage
+	statsMu     sync.Mutex
+	stats       metadata.SourceStats
 }
 
 type seasonCache struct {
@@ -39,13 +43,15 @@ type seasonCache struct {
 }
 
 type episodeEntry struct {
-	id     string
-	season int
-	number int
-	title  string
-	plot   string
-	aired  string
-	url    string
+	id      string
+	season  int
+	number  int
+	title   string
+	plot    string
+	aired   string
+	url     string
+	network string
+	thumb   string
 }
 
 var _ metadata.Provider = (*Provider)(nil)
@@ -60,7 +66,7 @@ func New(client *http.Client, baseURL string, language string, interval time.Dur
 	}
 	copied := *client
 	priorRedirect := copied.CheckRedirect
-	provider := &Provider{client: &copied, baseURL: strings.TrimRight(baseURL, "/"), language: language, interval: interval, seasons: make(map[string]*seasonCache)}
+	provider := &Provider{client: &copied, baseURL: strings.TrimRight(baseURL, "/"), language: language, interval: interval, seasons: make(map[string]*seasonCache), seriesPages: make(map[string]*seriesPage)}
 	copied.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !provider.allowedURL(req.URL) {
 			return fmt.Errorf("TheTVDB 重定向离开配置站点")
@@ -78,8 +84,13 @@ func New(client *http.Client, baseURL string, language string, interval time.Dur
 
 func (p *Provider) Name() string  { return "thetvdb" }
 func (p *Provider) Scope() string { return p.baseURL + "|" + p.language }
+func (p *Provider) Statistics() metadata.SourceStats {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	return p.stats
+}
 func (p *Provider) Supports(kind metadata.Kind) bool {
-	return kind == metadata.Show || kind == metadata.Episode
+	return kind == metadata.Show
 }
 
 func (p *Provider) Fetch(ctx context.Context, req metadata.Request) (*metadata.Record, error) {
@@ -107,34 +118,7 @@ func (p *Provider) Fetch(ctx context.Context, req metadata.Request) (*metadata.R
 	if err != nil {
 		return nil, err
 	}
-	if req.Kind == metadata.Show {
-		return record, nil
-	}
-	if req.Season < 0 || req.Episode <= 0 {
-		return nil, fmt.Errorf("TheTVDB 单集必须指定非负季号和正集号")
-	}
-	episodes, err := p.allSeasons(ctx, record.SourceURL+"/allseasons/official", record.Ref.Slug)
-	if err != nil {
-		return nil, err
-	}
-	var match *episodeEntry
-	for i := range episodes {
-		if episodes[i].season != req.Season || episodes[i].number != req.Episode {
-			continue
-		}
-		if match != nil {
-			return nil, fmt.Errorf("TheTVDB S%02dE%02d 对应多个单集编号: %w", req.Season, req.Episode, metadata.ErrAmbiguous)
-		}
-		match = &episodes[i]
-	}
-	if match == nil {
-		return nil, metadata.ErrNotFound
-	}
-	detail, detailURL, err := p.getHTML(ctx, match.url)
-	if err != nil {
-		return nil, err
-	}
-	return parseEpisode(detail, detailURL, p.language, *match)
+	return record, nil
 }
 
 func (p *Provider) showURL(ref metadata.Ref) (string, error) {
@@ -209,6 +193,17 @@ func (p *Provider) request(ctx context.Context, method, target string, body []by
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 	}
+	p.statsMu.Lock()
+	p.stats.HTTPAttempts++
+	path := req.URL.Path
+	if method == http.MethodPost || path == "/search" {
+		p.stats.SearchRequests++
+	} else if strings.HasSuffix(path, "/allseasons/official") || strings.Contains(path, "/seasons/official/") {
+		p.stats.BatchRequests++
+	} else if strings.Contains(path, "/episodes/") {
+		p.stats.DetailRequests++
+	}
+	p.statsMu.Unlock()
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("TheTVDB 请求: %w", err)

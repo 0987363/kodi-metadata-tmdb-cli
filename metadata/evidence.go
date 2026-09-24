@@ -1,29 +1,32 @@
 package metadata
 
-// JudgmentInput 保留原始上下文及人工约束，不遗漏特别篇的零季号。
+// JudgmentInput 保留作品上下文与整组单集约束；候选序位不是网站编号。
 type JudgmentInput struct {
-	Path         string `json:"path,omitempty"`
-	Filename     string `json:"filename,omitempty"`
-	Hints        []Ref  `json:"hints,omitempty"`
-	EpisodeTitle string `json:"episode_title,omitempty"`
-	Kind         Kind   `json:"kind"`
-	Ref          Ref    `json:"ref"`
-	Query        Query  `json:"query"`
-	Season       int    `json:"season"`
-	Episode      int    `json:"episode"`
-	Group        string `json:"group,omitempty"`
+	Path     string       `json:"path,omitempty"`
+	Filename string       `json:"filename,omitempty"`
+	Files    []string     `json:"files,omitempty"`
+	Hints    []Ref        `json:"hints,omitempty"`
+	Kind     Kind         `json:"kind"`
+	Ref      Ref          `json:"ref"`
+	Query    Query        `json:"query"`
+	Episodes []EpisodeKey `json:"episodes,omitempty"`
 }
 
 func JudgmentInputFor(request Request) JudgmentInput {
-	return JudgmentInput{Path: request.Path, Filename: request.Filename, Hints: request.Hints, EpisodeTitle: request.EpisodeTitle, Kind: request.Kind, Ref: request.Ref, Query: request.Query, Season: request.Season, Episode: request.Episode, Group: request.Group}
+	return JudgmentInput{Path: request.Path, Filename: request.Filename, Files: request.Files, Hints: request.Hints, Kind: request.Kind, Ref: request.Ref, Query: request.Query, Episodes: UniqueEpisodeKeys(request.Episodes)}
+}
+
+type EpisodeEvidence struct {
+	Key    EpisodeKey      `json:"requested"`
+	Record *RecordEvidence `json:"record"`
 }
 
 type OptionEvidence struct {
-	Work    *RecordEvidence `json:"work"`
-	Episode *RecordEvidence `json:"episode,omitempty"`
+	Work     *RecordEvidence   `json:"work"`
+	Episodes []EpisodeEvidence `json:"episodes,omitempty"`
 }
 
-// RecordEvidence 仅包含身份核验所需事实，排除演员和图库等无关大字段。
+// RecordEvidence 仅保留判断所需事实，不发送完整演员和图片集合。
 type RecordEvidence struct {
 	ExternalIDs   []Identifier `json:"external_ids,omitempty"`
 	Source        string       `json:"source"`
@@ -40,8 +43,13 @@ type RecordEvidence struct {
 }
 
 func EvidenceForOption(option Option) OptionEvidence {
-	return OptionEvidence{Work: recordEvidence(option.Work), Episode: recordEvidence(option.Episode)}
+	out := OptionEvidence{Work: recordEvidence(option.Work)}
+	for _, episode := range option.Episodes {
+		out.Episodes = append(out.Episodes, EpisodeEvidence{Key: episode.Key, Record: recordEvidence(episode.Record)})
+	}
+	return out
 }
+
 func recordEvidence(record *Record) *RecordEvidence {
 	if record == nil {
 		return nil

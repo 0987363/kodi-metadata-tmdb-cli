@@ -11,14 +11,14 @@ import (
 
 const configuredModels = `"llms":[{"name":"extract","type":"openai","base_url":"https://example.invalid/v1","api_key":"key","model":"extract-model"},{"name":"judge","type":"openai","base_url":"https://example.invalid/v1","api_key":"judge-key","model":"judge-model"},{"name":"unused-jev","type":"jev"}]`
 
-func writeTestConfig(t *testing.T, runMode, logMode, logLevel int) string {
+func writeTestConfig(t *testing.T, logMode, logLevel int) string {
 	t.Helper()
 	content := fmt.Sprintf(`{
   %s,
   "scraper":{"providers":["thetvdb"],"extract_llm":"extract","select_llm":"judge","cache_hours":0,"nfo_field":{"tag":true,"genre":false}},
   "log":{"mode":%d,"level":%d,"file":"./test.log"},
-  "collector":{"run_mode":%d,"movies_dir":["./movies/../movies"],"shows_dir":["./shows/../shows"]}
-}`, configuredModels, logMode, logLevel, runMode)
+  "collector":{"skip_folders":["cache"],"skip_keywords":["临时"],"tmp_suffix":[".part"]}
+}`, configuredModels, logMode, logLevel)
 	file := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(file, []byte(content), 0644); err != nil {
 		t.Fatal(err)
@@ -26,21 +26,21 @@ func writeTestConfig(t *testing.T, runMode, logMode, logLevel int) string {
 	return file
 }
 
-func TestLoadConfigPreservesExistingEnumsAndNormalizesPaths(t *testing.T) {
+func TestLoadConfigPreservesLogEnumsAndCollectorFilters(t *testing.T) {
 	for _, tc := range []struct {
-		name, path                                     string
-		run, mode, level, wantRun, wantMode, wantLevel int
+		name                             string
+		mode, level, wantMode, wantLevel int
 	}{
-		{name: "valid", run: CollectorRunModeSpec, mode: LogModeBoth, level: LogLevelFatal, wantRun: CollectorRunModeSpec, wantMode: LogModeBoth, wantLevel: LogLevelFatal},
-		{name: "invalid", run: 99, mode: 99, level: 99, wantRun: CollectorRunModeDaemon, wantMode: LogModeStdout, wantLevel: LogLevelInfo},
+		{name: "valid", mode: LogModeBoth, level: LogLevelFatal, wantMode: LogModeBoth, wantLevel: LogLevelFatal},
+		{name: "invalid", mode: 99, level: 99, wantMode: LogModeStdout, wantLevel: LogLevelInfo},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			LoadConfig(writeTestConfig(t, tc.run, tc.mode, tc.level), 0)
-			if Collector.RunMode != tc.wantRun || Log.Mode != tc.wantMode || Log.Level != tc.wantLevel {
+			LoadConfig(writeTestConfig(t, tc.mode, tc.level))
+			if Log.Mode != tc.wantMode || Log.Level != tc.wantLevel {
 				t.Fatalf("既有枚举行为变化: %+v %+v", Collector, Log)
 			}
-			if Collector.MoviesDir[0] != "movies" || Collector.ShowsDir[0] != "shows" {
-				t.Fatal("目录未清理")
+			if len(Collector.SkipFolders) != 1 || Collector.SkipFolders[0] != "cache" || len(Collector.SkipKeywords) != 1 || Collector.SkipKeywords[0] != "临时" || len(Collector.TmpSuffix) != 1 || Collector.TmpSuffix[0] != ".part" {
+				t.Fatal("过滤配置未加载")
 			}
 		})
 	}
@@ -48,7 +48,7 @@ func TestLoadConfigPreservesExistingEnumsAndNormalizesPaths(t *testing.T) {
 
 func TestLoadConfigBindsNamedModelsAndScraperWithoutUnusedCredentials(t *testing.T) {
 	t.Setenv("TYPESAFE_API_KEY", "")
-	LoadConfig(writeTestConfig(t, 2, 1, 1), 0)
+	LoadConfig(writeTestConfig(t, 1, 1))
 	if len(LLMs) != 3 || Scraper == nil || Scraper.ExtractLLM != "extract" || Scraper.SelectLLM != "judge" || len(Scraper.Providers) != 1 || Scraper.Providers[0] != "thetvdb" || Scraper.CacheHours != 0 || !Scraper.NfoField.Tag || Scraper.NfoField.Genre {
 		t.Fatalf("模型列表或独立刮削配置未正确绑定: %+v %+v", LLMs, Scraper)
 	}

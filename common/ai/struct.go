@@ -1,9 +1,29 @@
 package ai
 
-type ParseInput struct {
-	MediaType string `json:"media_type"`
-	Path      string `json:"path"`
-	Filename  string `json:"filename"`
+type BatchFile struct {
+	RelativePath string `json:"relative_path"`
+}
+type BatchInput struct {
+	Root  string      `json:"root"`
+	Files []BatchFile `json:"files"`
+}
+type Identity struct {
+	ParseResult
+	RelativePath string  `json:"relative_path"`
+	MediaType    string  `json:"media_type"`
+	SeriesRoot   string  `json:"series_root"`
+	ContentRole  *string `json:"content_role"`
+}
+type LocalDescription struct {
+	RelativePath string   `json:"relative_path"`
+	Title        string   `json:"title"`
+	Plot         string   `json:"plot"`
+	Genres       []string `json:"genres"`
+}
+type ClientStats struct {
+	AnalyzeRequests  int64
+	LocalRequests    int64
+	DecisionRequests int64
 }
 
 // ParseResult 只保存识别线索，nil 季集号表示未知，季号零仍是特别篇。

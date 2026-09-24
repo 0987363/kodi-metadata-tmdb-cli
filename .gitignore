@@ -9,5 +9,9 @@
 *.out
 vendor
 config.json
+/.config.json.swp
 release
 .gocache/
+.validation/
+/res.txt
+/res2.txt

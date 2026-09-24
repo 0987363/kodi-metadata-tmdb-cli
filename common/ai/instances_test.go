@@ -18,7 +18,7 @@ func TestNamedClientsKeepEndpointCredentialsModelAndTemperatureIsolated(t *testi
 	extractServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		extractCalls.Add(1)
 		assertCompletionRequest(t, r, "Bearer extract-key", "extract-model", 0.2, "extract_media_identity")
-		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": `{"title":"Extracted Movie"}`}}}})
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Extracted Movie"}]}`}}}})
 	}))
 	defer extractServer.Close()
 	judgeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,8 +46,8 @@ func TestNamedClientsKeepEndpointCredentialsModelAndTemperatureIsolated(t *testi
 		group.Add(2)
 		go func() {
 			defer group.Done()
-			got, err := extractor.ParseMediaContext(context.Background(), &ParseInput{MediaType: "movie", Filename: "Movie.mkv"})
-			if err != nil || got == nil || got.Title != "Extracted Movie" {
+			got, err := extractor.Analyze(context.Background(), BatchInput{Root: "/media", Files: []BatchFile{{RelativePath: "Movie.mkv"}}})
+			if err != nil || len(got) != 1 || got[0].Title != "Extracted Movie" {
 				t.Errorf("提取实例调用失败: %+v %v", got, err)
 			}
 		}()

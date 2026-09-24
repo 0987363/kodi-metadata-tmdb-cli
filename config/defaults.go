@@ -5,7 +5,7 @@ func applyDefaults(c *Config) {
 		c.Log = &LogConfig{Mode: LogModeStdout, Level: LogLevelInfo}
 	}
 	if c.Collector == nil {
-		c.Collector = &CollectorConfig{RunMode: CollectorRunModeOnce}
+		c.Collector = &CollectorConfig{}
 	}
 	if c.Tmdb == nil {
 		c.Tmdb = &TmdbConfig{}

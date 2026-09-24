@@ -1,12 +1,5 @@
 package config
 
-// 运行模式
-const (
-	CollectorRunModeDaemon = 1 // 守护进程模式
-	CollectorRunModeOnce   = 2 // 单次执行模式
-	CollectorRunModeSpec   = 3 // 临时指定目录模式
-)
-
 // 日志输出模式
 const (
 	LogModeStdout  = 1 // 仅标准输出

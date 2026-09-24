@@ -122,7 +122,7 @@ func TestMetadataMovieNormalizationAndInstanceImages(t *testing.T) {
 	}
 }
 
-func TestMetadataShowAndEpisodeKeepSeparateIdentities(t *testing.T) {
+func TestMetadataShowPreservesIdentityAndFields(t *testing.T) {
 	p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.URL.Query().Get("append_to_response"), "external_ids") {
 			t.Error("未请求同对象外部标识")
@@ -130,8 +130,6 @@ func TestMetadataShowAndEpisodeKeepSeparateIdentities(t *testing.T) {
 		switch r.URL.Path {
 		case "/3/tv/9":
 			fmt.Fprint(w, `{"id":9,"name":"节目","original_name":"Show","overview":"简介","first_air_date":"2024-01-01","last_air_date":"2024-02-01","status":"Ended","original_language":"en","number_of_seasons":1,"number_of_episodes":2,"networks":[{"name":"电视台"}],"production_companies":[{"name":"公司"}],"content_ratings":{"page":1,"total_pages":1,"total_results":1,"results":[{"iso_3166_1":"US","rating":"TV-PG"}]},"aggregate_credits":{"cast":[{"name":"演员","roles":[],"order":0}],"crew":[{"name":"导演","jobs":[{"job":"Director"}]}]},"seasons":[{"name":"第一季","season_number":1,"poster_path":"/season.jpg"}],"external_ids":{"imdb_id":"ttshow","tvdb_id":99}}`)
-		case "/3/tv/9/season/1/episode/2":
-			fmt.Fprint(w, `{"id":902,"show_id":9,"name":"单集","air_date":"2024-01-08","season_number":1,"episode_number":2,"runtime":42,"still_path":"/episode.jpg","guest_stars":[{"name":"客串","character":"本人"}],"crew":[{"name":"单集导演","job":"Director"}],"external_ids":{"imdb_id":"ttepisode","tvdb_id":999}}`)
 		default:
 			t.Errorf("路径错误：%s", r.URL.Path)
 		}
@@ -146,20 +144,6 @@ func TestMetadataShowAndEpisodeKeepSeparateIdentities(t *testing.T) {
 	}
 	if !reflect.DeepEqual(show.Studios, []string{"电视台", "公司"}) || !reflect.DeepEqual(show.Seasons, []metadata.Season{{Number: 1, Title: "第一季"}}) {
 		t.Fatalf("节目归一化错误：%+v", show)
-	}
-	ep, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: ref, Season: 1, Episode: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ep.Ref.ID != "902" || ep.Ref.Kind != metadata.Episode || ep.RuntimeMinutes != 42 || ep.SeasonNumber != 1 || ep.EpisodeNumber != 2 {
-		t.Fatalf("单集身份错误：%+v", ep)
-	}
-	wantIDs := []metadata.Identifier{{Type: "tmdb", Value: "902"}, {Type: "imdb", Value: "ttepisode"}, {Type: "tvdb", Value: "999"}}
-	if !reflect.DeepEqual(ep.ExternalIDs, wantIDs) {
-		t.Fatalf("单集外部标识错误：%+v", ep.ExternalIDs)
-	}
-	if !strings.Contains(ep.SourceURL, "/tv/9/season/1/episode/2") || len(ep.Actors) != 1 || ep.Actors[0].Name != "客串" {
-		t.Fatalf("单集事实错误：%+v", ep)
 	}
 }
 
@@ -178,7 +162,18 @@ func TestMetadataFetchRejectsWrongReference(t *testing.T) {
 	}
 }
 
-func TestMetadataEpisodeGroupsOrderBoundsAndIdentity(t *testing.T) {
+func TestMetadataFetchEpisodeUnsupportedBeforeNetwork(t *testing.T) {
+	p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) { t.Error("单集直取不应请求网络") })
+	if p.Supports(metadata.Episode) {
+		t.Fatal("单集直取不应声明支持")
+	}
+	_, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "9"}, Season: 1, Episode: 1})
+	if !errors.Is(err, metadata.ErrUnsupported) {
+		t.Fatalf("单集直取应返回不支持：%v", err)
+	}
+}
+
+func TestMetadataEpisodeGroupsOrderAndIdentity(t *testing.T) {
 	var wrongShow atomic.Bool
 	p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -190,8 +185,6 @@ func TestMetadataEpisodeGroupsOrderBoundsAndIdentity(t *testing.T) {
 				showID = 10
 			}
 			fmt.Fprintf(w, `{"id":"group","name":"分组","group_count":2,"episode_count":3,"groups":[{"name":"后篇","order":2,"episodes":[{"id":903,"season_number":3,"episode_number":1,"show_id":%d,"order":0}]},{"name":"前篇","order":1,"episodes":[{"id":902,"season_number":2,"episode_number":2,"show_id":9,"order":1},{"id":901,"season_number":2,"episode_number":1,"show_id":9,"order":0}]}]}`, showID)
-		case "/3/tv/9/season/2/episode/1":
-			fmt.Fprint(w, `{"id":901,"name":"第一集","season_number":2,"episode_number":1,"runtime":31}`)
 		default:
 			t.Errorf("分组映射路径错误：%s", r.URL.Path)
 		}
@@ -203,18 +196,6 @@ func TestMetadataEpisodeGroupsOrderBoundsAndIdentity(t *testing.T) {
 	}
 	if show.SeasonCount != 2 || show.EpisodeCount != 3 || !reflect.DeepEqual(show.Seasons, []metadata.Season{{Number: 1, Title: "前篇"}, {Number: 2, Title: "后篇"}}) {
 		t.Fatalf("分组节目错误：%+v", show)
-	}
-	ep, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: ref, Group: "group", Season: 1, Episode: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ep.Ref.ID != "901" || ep.SeasonNumber != 1 || ep.EpisodeNumber != 1 || !strings.Contains(ep.SourceURL, "/season/2/episode/1") {
-		t.Fatalf("分组集号未保留：%+v", ep)
-	}
-	for _, bounds := range [][2]int{{3, 1}, {1, 3}, {-1, 1}, {1, 0}} {
-		if _, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Episode, Ref: ref, Group: "group", Season: bounds[0], Episode: bounds[1]}); err == nil {
-			t.Fatalf("分组越界未拒绝：%v", bounds)
-		}
 	}
 	wrongShow.Store(true)
 	if _, err := p.Fetch(context.Background(), metadata.Request{Kind: metadata.Show, Ref: ref, Group: "group"}); err == nil {
