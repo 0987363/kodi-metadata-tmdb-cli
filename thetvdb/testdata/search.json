@@ -1,0 +1,41 @@
+{
+  "results": [
+    {
+      "hits": [
+        {
+          "id": 295936,
+          "name": "Alone",
+          "slug": "alone",
+          "type": "series",
+          "year": "2015",
+          "translations": {
+            "deu": "Alone",
+            "eng": "Alone",
+            "fin": "Alone - yksin erämaassa",
+            "fra": "Alone : Les Survivants",
+            "pt": "Sozinhos",
+            "rus": "В изоляции",
+            "spa": "Alone"
+          }
+        },
+        {
+          "id": 336604,
+          "name": "Alone Together",
+          "slug": "alone-together",
+          "type": "series",
+          "year": "2018",
+          "translations": {
+            "eng": "Alone Together",
+            "rus": "Одиноки вместе",
+            "spa": "Alone Together"
+          }
+        }
+      ],
+      "page": 0,
+      "nbPages": 1,
+      "nbHits": 2,
+      "hitsPerPage": 20,
+      "exhaustiveNbHits": true
+    }
+  ]
+}

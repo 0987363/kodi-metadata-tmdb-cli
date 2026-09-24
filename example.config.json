@@ -1,0 +1,106 @@
+{
+  "log": {
+    "mode": 1,
+    "level": 2,
+    "file": "/tmp/tmdb-collector.log"
+  },
+  "tmdb": {
+    "api_host": "https://api.themoviedb.org",
+    "image_host": "https://image.tmdb.org",
+    "api_key": "YOUR_TMDB_API_KEY",
+    "language": "zh-CN",
+    "proxy": "",
+    "rating": "US",
+    "timeout_seconds": 30,
+    "retry_count": 3
+  },
+  "collector": {
+    "run_mode": 1,
+    "watcher": true,
+    "cron_scan": true,
+    "cron_scan_boot": true,
+    "cron_seconds": 3600,
+    "skip_folders": [
+      "tmdb",
+      "@eaDir",
+      "CERTIFICATE",
+      "$RECYCLE.BIN",
+      "RECYCLER",
+      "SYSTEM VOLUME INFORMATION",
+      "@EADIR",
+      "ADV_OBJ",
+      "PLEX VERSIONS",
+      "Sample",
+      "gallery",
+      "metadata"
+    ],
+    "skip_keywords": [
+      "纯享",
+      "pure"
+    ],
+    "tmp_suffix": [
+      ".part",
+      ".!qB",
+      ".!qb",
+      ".!ut"
+    ],
+    "movies_dir": [
+      "/volume1/down/movies"
+    ],
+    "shows_dir": [
+      "/volume1/down/shows"
+    ]
+  },
+  "thetvdb": {
+    "base_url": "https://thetvdb.com",
+    "language": "zho",
+    "proxy": "",
+    "timeout_seconds": 30,
+    "request_interval_ms": 1000
+  },
+  "llms": [
+    {
+      "name": "media-extract",
+      "type": "openai",
+      "base_url": "https://llm.example.com/v1",
+      "api_key": "YOUR_EXTRACT_KEY",
+      "model": "YOUR_EXTRACT_MODEL",
+      "proxy": "",
+      "timeout_seconds": 30,
+      "temperature": 0.2
+    },
+    {
+      "name": "general-select",
+      "type": "openai",
+      "base_url": "https://llm.example.com/v1",
+      "api_key": "YOUR_SELECT_KEY",
+      "model": "YOUR_SELECT_MODEL",
+      "proxy": "",
+      "timeout_seconds": 30,
+      "temperature": 0.2
+    },
+    {
+      "name": "jev-select",
+      "type": "jev",
+      "base_url": "https://api.typesafe.ai/v1",
+      "api_key": "",
+      "model": "jev-latest",
+      "proxy": "",
+      "timeout_seconds": 30
+    }
+  ],
+  "scraper": {
+    "providers": [
+      "thetvdb",
+      "tmdb"
+    ],
+    "extract_llm": "media-extract",
+    "select_llm": "jev-select",
+    "cache_hours": 24,
+    "jev_match_threshold": 0.8,
+    "nfo_field": {
+      "tag": true,
+      "genre": true
+    }
+  }
+}

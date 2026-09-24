@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<episodedetails>
+  <title>格式验收单集</title>
+  <showtitle>格式验收剧集</showtitle>
+  <uniqueid type="tvdb" default="true">300</uniqueid>
+  <premiered>2020-01-03</premiered>
+  <aired>2020-01-03</aired>
+  <ratings></ratings>
+  <season>1</season>
+  <episode>2</episode>
+  <runtime>45</runtime>
+  <thumb aspect="thumb">https://example.invalid/episode.jpg</thumb>
+  <fanart></fanart>
+</episodedetails>

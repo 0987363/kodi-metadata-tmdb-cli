@@ -1,0 +1,24 @@
+package config
+
+// 运行模式
+const (
+	CollectorRunModeDaemon = 1 // 守护进程模式
+	CollectorRunModeOnce   = 2 // 单次执行模式
+	CollectorRunModeSpec   = 3 // 临时指定目录模式
+)
+
+// 日志输出模式
+const (
+	LogModeStdout  = 1 // 仅标准输出
+	LogModeLogfile = 2 // 仅日志文件
+	LogModeBoth    = 3 // 标准输出和日志文件
+)
+
+// 日志等级
+const (
+	LogLevelDebug   = 0 // debug
+	LogLevelInfo    = 1 // info
+	LogLevelWarning = 2 // warning
+	LogLevelError   = 3 // error
+	LogLevelFatal   = 4 // fatal
+)

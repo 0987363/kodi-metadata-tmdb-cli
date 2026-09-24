@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tvshow>
+  <title>格式验收剧集</title>
+  <uniqueid type="tvdb" default="true">200</uniqueid>
+  <uniqueid type="tmdb">201</uniqueid>
+  <premiered>2020-01-02</premiered>
+  <status>Ended</status>
+  <ratings></ratings>
+  <namedseason number="1">第一季</namedseason>
+  <thumb aspect="poster">https://example.invalid/show.jpg</thumb>
+  <fanart></fanart>
+</tvshow>

@@ -1,0 +1,147 @@
+package utils
+
+import (
+	"fengqi/kodi-metadata-tmdb-cli/config"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"time"
+)
+
+type logLevel int
+
+const (
+	DEBUG   logLevel = logLevel(config.LogLevelDebug)
+	INFO    logLevel = logLevel(config.LogLevelInfo)
+	WARNING logLevel = logLevel(config.LogLevelWarning)
+	ERROR   logLevel = logLevel(config.LogLevelError)
+	FATAL   logLevel = logLevel(config.LogLevelFatal)
+)
+
+var (
+	Logger   *logger
+	levelMap = map[logLevel]string{
+		DEBUG:   "debug",
+		INFO:    "info",
+		WARNING: "warning",
+		ERROR:   "error",
+		FATAL:   "fatal",
+	}
+)
+
+type logger struct {
+	level logLevel
+	lock  *sync.Mutex
+	file  *os.File
+	mode  int
+}
+
+func InitLogger() {
+	var err error
+	var file *os.File
+	if config.Log.Mode != config.LogModeStdout {
+		file, err = os.OpenFile(config.Log.File, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			log.Fatalf("open log file:%s err: %v", config.Log.File, err)
+		}
+	}
+
+	Logger = &logger{
+		level: logLevel(config.Log.Level),
+		lock:  new(sync.Mutex),
+		file:  file,
+		mode:  config.Log.Mode,
+	}
+}
+
+func (l *logger) Debug(v ...any) {
+	l.print(DEBUG, v...)
+}
+
+func (l *logger) DebugF(format string, v ...any) {
+	l.printf(DEBUG, format, v...)
+}
+
+func (l *logger) Info(v ...any) {
+	l.print(INFO, v...)
+}
+
+func (l *logger) InfoF(format string, v ...any) {
+	l.printf(INFO, format, v...)
+}
+
+func (l *logger) Warning(v ...any) {
+	l.print(WARNING, v...)
+}
+
+func (l *logger) WarningF(format string, v ...any) {
+	l.printf(WARNING, format, v...)
+}
+
+func (l *logger) Error(v ...any) {
+	l.print(ERROR, v...)
+}
+
+func (l *logger) ErrorF(format string, v ...any) {
+	l.printf(ERROR, format, v...)
+}
+
+func (l *logger) Fatal(v ...any) {
+	if FATAL >= l.level {
+		l.write(FATAL, fmt.Sprint(v...))
+		if l.mode != config.LogModeLogfile {
+			log.Fatal(v...)
+		}
+	}
+}
+
+func (l *logger) FatalF(format string, v ...any) {
+	if FATAL >= l.level {
+		l.write(FATAL, fmt.Sprintf(format, v...))
+		if l.mode != config.LogModeLogfile {
+			log.Fatalf(format, v...)
+		}
+	}
+}
+
+func (l *logger) print(level logLevel, v ...any) {
+	if level >= l.level {
+		l.write(level, fmt.Sprint(v...))
+		if l.mode != config.LogModeLogfile {
+			log.Print(v...)
+		}
+	}
+}
+
+func (l *logger) printf(level logLevel, format string, v ...any) {
+	if level >= l.level {
+		l.write(level, fmt.Sprintf(format, v...))
+		if l.mode != config.LogModeLogfile {
+			log.Printf(levelMap[level]+" "+format, v...)
+		}
+	}
+}
+
+func (l *logger) write(level logLevel, str string) {
+	if l.file == nil || l.mode == config.LogModeStdout {
+		return
+	}
+
+	l.lock.Lock()
+	defer l.lock.Unlock()
+
+	// 结尾自动空格
+	if len(str) == 0 || str[len(str)-1] != '\n' {
+		str += "\n"
+	}
+
+	now := time.Now().Format("2006/01/02 15:04:05")
+	levelStr, _ := levelMap[level]
+	str = fmt.Sprintf("%s %s %s", now, levelStr, str)
+
+	_, err := l.file.WriteString(str)
+	if err != nil {
+		log.Fatalf("write log file: %s, err: %v", l.file.Name(), err)
+	}
+}

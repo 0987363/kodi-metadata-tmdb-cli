@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<movie>
+  <title>格式验收电影 &amp; XML</title>
+  <originaltitle>Sample Movie</originaltitle>
+  <plot>简介 &lt;内容&gt; &amp; 引号</plot>
+  <uniqueid type="tmdb" default="true">100</uniqueid>
+  <premiered>2020-01-02</premiered>
+  <genre>Drama</genre>
+  <tag>Drama</tag>
+  <studio>Studio</studio>
+  <country>China</country>
+  <actor>
+    <name>演员</name>
+    <role>角色</role>
+    <order>0</order>
+    <thumb>https://example.invalid/actor.jpg</thumb>
+  </actor>
+  <director>导演</director>
+  <credits>编剧</credits>
+  <ratings>
+    <rating name="tmdb" max="10">
+      <value>8.1</value>
+      <votes>42</votes>
+    </rating>
+  </ratings>
+  <runtime>123</runtime>
+  <thumb aspect="poster">https://example.invalid/poster.jpg</thumb>
+  <fanart>
+    <thumb>https://example.invalid/fanart.jpg</thumb>
+  </fanart>
+</movie>
