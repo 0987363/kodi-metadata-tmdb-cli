@@ -90,6 +90,6 @@ go vet ./...
 make linux-amd64
 ```
 
-The merged baseline passed race tests, vet and platform builds. The first two real sample shows passed for 52 videos; the old stop-on-first-source-failure rule interrupted Super.Science before TMDb or local AI ran. This revision verifies ordered continuation through the metadata methods. Overall acceptance of the ten res.txt shows and the res2.txt collection remains incomplete; see the [validation record](docs/validation-2026-09-24.md). Controlled tests do not establish real model accuracy or actual server import. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit boundaries](docs/provider-audit.md).
+The merged baseline passed race tests, vet and platform builds. The ordered-continuation fix is merged and verified on master. The first three real samples passed for 60 videos, including Super.Science through input-only AI after both website candidate lists were rejected. The fourth sample stopped before website requests because episode coordinates were unknown. Overall acceptance of the ten res.txt shows and the res2.txt collection remains incomplete; see the [validation record](docs/validation-2026-09-24.md). Controlled tests do not establish real model accuracy or actual server import. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit boundaries](docs/provider-audit.md).
 
 Sources: [TMDb](https://www.themoviedb.org/), [TheTVDB](https://thetvdb.com/), [TypeSafe API](https://docs.typesafe.ai/api). [GPL-3.0](LICENSE).
