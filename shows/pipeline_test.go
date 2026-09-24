@@ -32,6 +32,28 @@ func showEntry(t *testing.T, root, sub, name, relative string, season, episode *
 }
 func number(n int) *int { return &n }
 
+func TestPrepareUnknownCoordinatesIdentifyFileAndValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		season  *int
+		episode *int
+		values  string
+	}{
+		{"unknown_season", nil, number(2), "季已知=false 季=0 集=2"},
+		{"unknown_episode", number(1), nil, "季已知=true 季=1 集=0"},
+		{"special_unknown_episode", number(0), nil, "季已知=true 季=0 集=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "节目")
+			entry := showEntry(t, root, "Season 01", "分段节目.02.mkv", "Season 01/分段节目.02.mkv", tc.season, tc.episode)
+			_, err := Prepare(root, []Entry{entry})
+			if err == nil || !strings.Contains(err.Error(), entry.File.Path) || !strings.Contains(err.Error(), tc.values) {
+				t.Fatalf("季集错误缺少文件定位或实际校验值：%v", err)
+			}
+		})
+	}
+}
+
 func TestPrepareCollectsIDsBeyondFirstEntry(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "节目")
 	a := showEntry(t, root, "Season 01", "one.mkv", "Season 01/one.mkv", number(1), number(1))

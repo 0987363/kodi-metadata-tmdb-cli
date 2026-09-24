@@ -113,7 +113,7 @@ func Prepare(root string, entries []Entry) (*Task, error) {
 			return nil, err
 		}
 		if !s.SeasonKnown || s.Season < 0 || s.Episode < 1 {
-			return nil, errors.New("未识别出有效季集号，且人工设置未补足")
+			return nil, fmt.Errorf("未识别出有效季集号，且人工设置未补足：文件=%q 季已知=%t 季=%d 集=%d", path, s.SeasonKnown, s.Season, s.Episode)
 		}
 		if id.TMDBID != "" {
 			if tmdbID != "" && tmdbID != id.TMDBID {
