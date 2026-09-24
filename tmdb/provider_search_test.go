@@ -45,12 +45,12 @@ func TestMetadataSearchCollectsEveryTitleAndPage(t *testing.T) {
 func TestMetadataSearchDeduplicatesTrimmedTitles(t *testing.T) {
 	var requests []string
 	p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
-		requests = append(requests, r.URL.Query().Get("query")+"|"+r.URL.Query().Get("year"))
+		requests = append(requests, r.URL.Query().Get("query")+"|"+r.URL.Query().Get("primary_release_year"))
 		fmt.Fprint(w, `{"page":1,"total_pages":1,"total_results":1,"results":[{"id":1,"title":"目标"}]}`)
 	})
 	got, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Movie, Title: " 目标 ", ChineseTitle: "目标", OriginalTitle: "目标 ", Year: 2024})
-	if err != nil || len(got) != 1 || !reflect.DeepEqual(requests, []string{"目标|2024", "目标|"}) {
-		t.Fatalf("标题去重或年份变体不正确：%+v %v %v", got, requests, err)
+	if err != nil || len(got) != 1 || !reflect.DeepEqual(requests, []string{"目标|2024"}) {
+		t.Fatalf("标题去重或已知年份约束不正确：%+v %v %v", got, requests, err)
 	}
 }
 

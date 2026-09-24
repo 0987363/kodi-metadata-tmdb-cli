@@ -53,7 +53,7 @@ func TestNamedClientsKeepEndpointCredentialsModelAndTemperatureIsolated(t *testi
 		}()
 		go func() {
 			defer group.Done()
-			got, err := NewJudge(judgeClient).Select(context.Background(), metadata.Request{Kind: metadata.Movie}, judgeOptions())
+			got, err := NewJudge(judgeClient).Select(context.Background(), metadata.Request{Kind: metadata.Movie}, judgeCandidates())
 			if err != nil || got != 0 {
 				t.Errorf("判断实例调用失败: %d %v", got, err)
 			}

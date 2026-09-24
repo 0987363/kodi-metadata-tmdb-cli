@@ -36,35 +36,30 @@ func (p *metadataProvider) Search(ctx context.Context, query metadata.Query) ([]
 	if len(titles) == 0 {
 		return nil, errors.New("TMDb 搜索标题为空")
 	}
-	years := []int{0}
-	if query.Year > 0 {
-		years = []int{query.Year, 0}
-	}
 	var candidates []metadata.Candidate
 	seen := make(map[string]bool)
 	for _, title := range titles {
-		for _, year := range years {
-			args := url.Values{"query": {title}, "include_adult": {"true"}}
-			if year > 0 {
-				args.Set("year", strconv.Itoa(year))
-				if query.Kind == metadata.Movie {
-					args.Set("primary_release_year", strconv.Itoa(year))
-				}
+		args := url.Values{"query": {title}, "include_adult": {"true"}}
+		if query.Year > 0 {
+			field := "primary_release_year"
+			if query.Kind == metadata.Show {
+				field = "first_air_date_year"
 			}
-			results, err := p.searchAllPages(ctx, query.Kind, args)
-			if err != nil {
-				return nil, err
+			args.Set(field, strconv.Itoa(query.Year))
+		}
+		results, err := p.searchAllPages(ctx, query.Kind, args)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range results {
+			if seen[candidate.Ref.ID] {
+				continue
 			}
-			for _, candidate := range results {
-				if seen[candidate.Ref.ID] {
-					continue
-				}
-				if len(candidates) == metadata.MaxDecisionCandidates {
-					return nil, fmt.Errorf("TMDb 搜索候选超过 %d 条，无法完整判断", metadata.MaxDecisionCandidates)
-				}
-				seen[candidate.Ref.ID] = true
-				candidates = append(candidates, candidate)
+			if len(candidates) == metadata.MaxDecisionCandidates {
+				return nil, fmt.Errorf("TMDb 搜索候选超过 %d 条，无法完整判断", metadata.MaxDecisionCandidates)
 			}
+			seen[candidate.Ref.ID] = true
+			candidates = append(candidates, candidate)
 		}
 	}
 	if len(candidates) == 0 {

@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-type judgeFunc func(context.Context, Request, []Option) (int, error)
+type judgeFunc func(context.Context, Request, []Candidate) (int, error)
 
-func (f judgeFunc) Select(ctx context.Context, req Request, options []Option) (int, error) {
+func (f judgeFunc) Select(ctx context.Context, req Request, options []Candidate) (int, error) {
 	return f(ctx, req, options)
 }
 
@@ -55,88 +55,76 @@ func (p *controlledProvider) FetchSeries(ctx context.Context, req SeriesRequest)
 	return result, nil
 }
 
-func TestResolveUnconfirmedSourceContinues(t *testing.T) {
+func TestResolveUnconfirmedSourceStops(t *testing.T) {
 	for _, unconfirmed := range []error{ErrNotFound, ErrAmbiguous} {
 		t.Run(unconfirmed.Error(), func(t *testing.T) {
 			a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 			calls := 0
-			judge := judgeFunc(func(_ context.Context, _ Request, options []Option) (int, error) {
+			judge := judgeFunc(func(_ context.Context, _ Request, candidates []Candidate) (int, error) {
 				calls++
-				wantSource := "tmdb"
-				if calls == 2 {
-					wantSource = "thetvdb"
+				if len(candidates) != 1 || candidates[0].Ref.Provider != "tmdb" || a.fetchCalls+b.searchCalls+b.fetchCalls != 0 {
+					t.Fatalf("判断前访问了详情或后续来源：%+v a=%+v b=%+v", candidates, a, b)
 				}
-				if len(options) != 1 || options[0].Work.Ref.Provider != wantSource || len(options[0].Episodes) == 0 || options[0].Episodes[0].Record.Ref.Provider != wantSource {
-					t.Fatalf("判断必须只接收当前来源的完整候选包：%+v", options)
-				}
-				if calls == 1 {
-					if b.searchCalls+b.fetchCalls != 0 {
-						t.Fatal("尚未判断第一来源就访问了第二来源")
-					}
-					return -1, fmt.Errorf("未确认: %w", unconfirmed)
-				}
-				return 0, nil
+				return -1, fmt.Errorf("未确认: %w", unconfirmed)
 			})
-			manager := NewManager([]Provider{a, b}, 0, judge)
-			got, err := manager.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}, t.TempDir())
-			if err != nil || got.Work.Ref.Provider != "thetvdb" || calls != 2 || a.fetchCalls != 1 || b.fetchCalls != 2 {
-				t.Fatalf("第一来源未确认后未选中第二来源：%+v %v calls=%d", got, err, calls)
+			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}, t.TempDir())
+			if got != nil || !errors.Is(err, unconfirmed) || errors.Is(err, ErrNoMatch) || calls != 1 || b.searchCalls+b.fetchCalls != 0 {
+				t.Fatalf("判断拒绝未立即停止：%+v %v calls=%d", got, err, calls)
 			}
 		})
 	}
 }
-
-func TestResolveKnownIDsRemainSourceScopedAfterRejection(t *testing.T) {
-	a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
-	calls := 0
-	judge := judgeFunc(func(_ context.Context, _ Request, options []Option) (int, error) {
-		calls++
-		if len(options) != 1 {
-			t.Fatalf("候选被跨来源合并：%+v", options)
-		}
-		if calls == 1 {
-			if options[0].Work.Ref.ID != "11" {
-				t.Fatal("第一来源未使用所属作品编号")
-			}
-			return -1, ErrNotFound
-		}
-		return 0, nil
-	})
-	req := Request{Kind: Show, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}, Hints: []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}, {Provider: "thetvdb", Kind: Show, ID: "22"}}}
-	got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), req, t.TempDir())
-	if err != nil || got.Work.Ref.Provider != "thetvdb" || got.Work.Ref.ID != "22" || a.searchCalls+b.searchCalls != 0 || a.fetchCalls != 1 || b.fetchCalls != 2 || calls != 2 {
-		t.Fatalf("来源编号直取顺序错误：%+v %v a=%+v b=%+v calls=%d", got, err, a, b, calls)
-	}
-}
-
-func TestResolveSkipsSourcesWithoutValidOptions(t *testing.T) {
+func TestResolveModelHintsAreSourceScopedAndUnconfirmedHintUsesJudge(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		search func(context.Context, Query) ([]Candidate, error)
-		fetch  func(context.Context, Request) (*Record, error)
+		name      string
+		hints     []Ref
+		wantJudge int
 	}{
-		{name: "search_not_found", search: func(context.Context, Query) ([]Candidate, error) { return nil, ErrNotFound }},
-		{name: "empty_search", search: func(context.Context, Query) ([]Candidate, error) { return nil, nil }},
-		{name: "missing_work", fetch: func(context.Context, Request) (*Record, error) { return nil, ErrNotFound }},
-		{name: "constraint_mismatch", fetch: func(context.Context, Request) (*Record, error) { return nil, ErrConstraintMismatch }},
-		{name: "missing_episode", fetch: func(_ context.Context, req Request) (*Record, error) {
-			if req.Kind == Episode {
-				return nil, ErrNotFound
-			}
-			return &Record{Ref: req.Ref, Title: "节目"}, nil
-		}},
+		{"same source matches", []Ref{{Provider: "tmdb", Kind: Show, ID: "42"}}, 0},
+		{"other source same id", []Ref{{Provider: "thetvdb", Kind: Show, ID: "42"}}, 1},
+		{"wrong id uses search results", []Ref{{Provider: "tmdb", Kind: Show, ID: "11"}}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &controlledProvider{testProvider: &testProvider{name: "tmdb"}, search: tc.search, fetch: tc.fetch}
-			b, judge := &testProvider{name: "thetvdb"}, new(testJudge)
-			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}, t.TempDir())
-			if err != nil || got.Work.Ref.Provider != "thetvdb" || judge.calls != 1 || len(judge.seen) != 1 || len(judge.seen[0].Episodes) == 0 {
-				t.Fatalf("空候选来源阻止后续判断或不完整事实进入判断：%+v %v %+v", got, err, judge)
+			a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
+			j := &testJudge{}
+			req := Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}, Hints: tc.hints}
+			got, err := NewManager([]Provider{a, b}, 0, j).Resolve(context.Background(), req, t.TempDir())
+			if err != nil || got.Work.Ref.ID != "42" || a.searchCalls != 1 || a.fetchCalls != 1 || j.calls != tc.wantJudge || b.searchCalls+b.fetchCalls != 0 {
+				t.Fatalf("编号作用域或搜索优先错误：%+v %v a=%+v b=%+v judge=%+v", got, err, a, b, j)
 			}
 		})
 	}
 }
-
+func TestResolveOnlyEmptySearchAdvances(t *testing.T) {
+	for _, empty := range []bool{true, false} {
+		t.Run(fmt.Sprint(empty), func(t *testing.T) {
+			a := &controlledProvider{testProvider: &testProvider{name: "tmdb"}, search: func(context.Context, Query) ([]Candidate, error) {
+				if empty {
+					return nil, nil
+				}
+				return nil, ErrNotFound
+			}}
+			b := &testProvider{name: "thetvdb"}
+			j := &testJudge{}
+			got, err := NewManager([]Provider{a, b}, 0, j).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}, t.TempDir())
+			if err != nil || got.Work.Ref.Provider != "thetvdb" || j.calls != 1 || a.fetchCalls != 0 || b.fetchCalls != 1 {
+				t.Fatalf("正常空搜索未继续：%+v %v a=%+v b=%+v", got, err, a, b)
+			}
+		})
+	}
+}
+func TestResolveSelectedDetailsFailureNeverAdvances(t *testing.T) {
+	for _, failure := range []error{ErrNotFound, ErrConstraintMismatch, errors.New("HTTP 500")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			a, b := &testProvider{name: "tmdb", fetchError: failure}, &testProvider{name: "thetvdb"}
+			j := &testJudge{}
+			got, err := NewManager([]Provider{a, b}, 0, j).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir())
+			if got != nil || !errors.Is(err, failure) || errors.Is(err, ErrNoMatch) || j.calls != 1 || b.searchCalls+b.fetchCalls != 0 {
+				t.Fatalf("选中详情错误未停止：%+v %v a=%+v b=%+v", got, err, a, b)
+			}
+		})
+	}
+}
 func TestResolveErrorsStopBeforeLaterSources(t *testing.T) {
 	requestError := errors.New("HTTP 403")
 	protocolError := errors.New("invalid JSON")
@@ -181,8 +169,8 @@ func TestResolveManualSourceNeverFallsThrough(t *testing.T) {
 		judgeErr  error
 		wantErr   error
 	}{
-		{name: "source_rejected", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrNotFound, wantErr: ErrNoMatch},
-		{name: "source_uncertain", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrAmbiguous, wantErr: ErrNoMatch},
+		{name: "source_rejected", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrNotFound, wantErr: ErrNotFound},
+		{name: "source_uncertain", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrAmbiguous, wantErr: ErrAmbiguous},
 		{name: "source_missing", ref: Ref{Provider: "tmdb", Kind: Show}, searchErr: ErrNotFound, wantErr: ErrNoMatch},
 		{name: "fixed_work_missing", ref: Ref{Provider: "tmdb", Kind: Show, ID: "11"}, fetchErr: ErrNotFound, wantErr: ErrConstraintMismatch},
 		{name: "fixed_work_constraint_mismatch", ref: Ref{Provider: "tmdb", Kind: Show, ID: "11"}, fetchErr: ErrConstraintMismatch, wantErr: ErrConstraintMismatch},
@@ -202,7 +190,7 @@ func TestResolveManualGroupsReachAllBatches(t *testing.T) {
 	p := &seriesResolveProvider{testProvider: testProvider{name: "tmdb"}}
 	req := Request{Kind: Show, Ref: Ref{Provider: "tmdb", Kind: Show, ID: "11"}, Episodes: []EpisodeKey{{Season: 2, Episode: 3, Group: "group-a"}, {Season: 3, Episode: 1, Group: "group-b"}}}
 	got, err := NewManager([]Provider{p}, 0, new(testJudge)).Resolve(context.Background(), req, t.TempDir())
-	if err != nil || len(got.Episodes) != 2 || len(p.batches) != 2 {
+	if err != nil || len(got.Episodes) != 2 || len(p.batches) != 1 {
 		t.Fatalf("分组批量请求失败: %+v %v", got, err)
 	}
 	for _, batch := range p.batches {
@@ -236,7 +224,7 @@ func TestResolveCancellationCannotBecomeUnconfirmed(t *testing.T) {
 				}
 			}
 			calls := 0
-			judge := judgeFunc(func(context.Context, Request, []Option) (int, error) {
+			judge := judgeFunc(func(context.Context, Request, []Candidate) (int, error) {
 				calls++
 				cancel()
 				return 0, tc.resultErr
@@ -268,13 +256,10 @@ func TestResolveCandidateLimitAppliesPerSource(t *testing.T) {
 			}
 			a, b := makeProvider("tmdb"), makeProvider("thetvdb")
 			calls := 0
-			judge := judgeFunc(func(_ context.Context, _ Request, options []Option) (int, error) {
+			judge := judgeFunc(func(_ context.Context, _ Request, options []Candidate) (int, error) {
 				calls++
 				if len(options) != 254 {
 					t.Fatalf("候选集合被截断或跨来源累加：%d", len(options))
-				}
-				if calls == 1 {
-					return -1, ErrNotFound
 				}
 				return 253, nil
 			})
@@ -285,7 +270,7 @@ func TestResolveCandidateLimitAppliesPerSource(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || got.Work.Ref.Provider != "thetvdb" || got.Work.Ref.ID != "254" || calls != 2 {
+			if err != nil || got.Work.Ref.Provider != "tmdb" || got.Work.Ref.ID != "254" || calls != 1 || b.searchCalls != 0 || a.fetchCalls != 1 {
 				t.Fatalf("候选上限被跨来源累计：%+v %v calls=%d", got, err, calls)
 			}
 		})

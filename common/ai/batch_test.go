@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -233,5 +234,47 @@ func TestDescribeLocalRestrictsFactsAndCoversPaths(t *testing.T) {
 				t.Fatal("接受无效描述")
 			}
 		})
+	}
+}
+
+func TestAnalyzeRequestsKnownIdentifiersAsUnverifiedHints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			t.Error(err)
+		}
+		var prompt struct {
+			Schema       outputSchema `json:"schema"`
+			Requirements []string     `json:"requirements"`
+		}
+		if err := json.Unmarshal([]byte(envelope.Messages[1].Content), &prompt); err != nil {
+			t.Error(err)
+		}
+		requirements := strings.Join(prompt.Requirements, " ")
+		if !strings.Contains(requirements, "prior knowledge") || !strings.Contains(requirements, "unverified") || !strings.Contains(requirements, "unknown identifiers empty") || strings.Contains(requirements, "Use only filename and directory clues") {
+			t.Errorf("识别协议未允许已知编号线索或误作已验证事实: %s", requirements)
+		}
+		for _, field := range []string{"tmdb_id", "thetvdb_id"} {
+			if !strings.Contains(prompt.Schema.Items.Fields[field], "unverified") {
+				t.Errorf("%s 未定义为未验证提示", field)
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": `{"items":[{"relative_path":"Show/a.mkv","media_type":"tv","series_root":"Show","title":"Show","tmdb_id":"74747","thetvdb_id":"371065"},{"relative_path":"Unknown.mkv","media_type":"movie","title":"Unknown","tmdb_id":"","thetvdb_id":""}]}`}}}})
+	}))
+	defer server.Close()
+	client, err := New(config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "test", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.Analyze(context.Background(), BatchInput{Root: "/media", Files: []BatchFile{{RelativePath: "Show/a.mkv"}, {RelativePath: "Unknown.mkv"}}})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("识别失败: %+v %v", got, err)
+	}
+	if got[0].TMDBID != "74747" || got[0].TheTVDBID != "371065" || got[1].TMDBID != "" || got[1].TheTVDBID != "" {
+		t.Fatalf("已知提示或未知空值未保留: %+v", got)
 	}
 }

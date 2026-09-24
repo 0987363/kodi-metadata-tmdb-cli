@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"fengqi/kodi-metadata-tmdb-cli/common/httpx"
 	"fengqi/kodi-metadata-tmdb-cli/config"
@@ -40,7 +39,6 @@ func NewMetadataProvider(c *config.TmdbConfig) metadata.Provider {
 	if settings.TimeoutSeconds <= 0 {
 		settings.TimeoutSeconds = 30
 	}
-	settings.RetryCount = max(0, settings.RetryCount)
 	client := httpx.NewClient(settings.Proxy, settings.TimeoutSeconds)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &metadataProvider{config: settings, client: client, seriesGate: make(chan struct{}, 1)}
@@ -79,50 +77,30 @@ func (p *metadataProvider) requestJSON(ctx context.Context, path string, args ur
 	args.Set("api_key", p.config.ApiKey)
 	args.Set("language", p.config.Language)
 	endpoint.RawQuery = args.Encode()
-	for attempt := 0; ; attempt++ {
-		body, requestErr := p.requestOnce(ctx, endpoint.String(), attempt > 0)
-		if requestErr == nil {
-			if err := json.Unmarshal(body, target); err != nil {
-				return fmt.Errorf("解析 TMDb %s 响应：%w", path, err)
-			}
-			return nil
-		}
+	body, err := p.requestOnce(ctx, endpoint.String())
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		var status *statusError
-		hasStatus := errors.As(requestErr, &status)
-		if hasStatus && status.code == http.StatusNotFound {
+		if errors.As(err, &status) && status.code == http.StatusNotFound {
 			return fmt.Errorf("TMDb %s：%w", path, metadata.ErrNotFound)
 		}
-		retryable := !errors.Is(requestErr, errResponseTooLarge) && (!hasStatus || status.code == http.StatusTooManyRequests || status.code >= 500)
-		if attempt >= p.config.RetryCount || !retryable {
-			return fmt.Errorf("TMDb %s：%w", path, requestErr)
-		}
-		wait := time.Second << uint(min(attempt, 5))
-		if status != nil && status.code == http.StatusTooManyRequests && status.retryAfter > 0 {
-			wait = min(status.retryAfter, 10*time.Second)
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
+		return fmt.Errorf("TMDb %s：%w", path, err)
 	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("解析 TMDb %s 响应：%w", path, err)
+	}
+	return nil
 }
 
-func (p *metadataProvider) requestOnce(ctx context.Context, endpoint string, retry bool) ([]byte, error) {
+func (p *metadataProvider) requestOnce(ctx context.Context, endpoint string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, errors.New("TMDb 请求地址无效")
 	}
 	p.statsMu.Lock()
 	p.stats.HTTPAttempts++
-	if retry {
-		p.stats.Retries++
-	}
 	if strings.HasPrefix(req.URL.Path, "/3/search/") {
 		p.stats.SearchRequests++
 	} else if suffix, ok := strings.CutPrefix(req.URL.Path, "/3/tv/"); ok && suffix != "" && !strings.Contains(suffix, "/") && req.URL.Query().Get("append_to_response") != "" {
@@ -143,13 +121,7 @@ func (p *metadataProvider) requestOnce(ctx context.Context, endpoint string, ret
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		retryAfter := time.Duration(0)
-		if seconds, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && seconds > 0 {
-			retryAfter = time.Duration(min(seconds, 10)) * time.Second
-		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil {
-			retryAfter = min(time.Until(date), 10*time.Second)
-		}
-		return nil, &statusError{code: resp.StatusCode, retryAfter: retryAfter}
+		return nil, &statusError{code: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {

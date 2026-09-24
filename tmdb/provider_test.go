@@ -69,7 +69,7 @@ func TestMetadataSearchReturnsAllUniqueCandidates(t *testing.T) {
 		}
 	})
 	for _, kind := range []metadata.Kind{metadata.Movie, metadata.Show} {
-		got, err := p.Search(context.Background(), metadata.Query{Kind: kind, Title: "目标", OriginalTitle: "Target", Year: 2024})
+		got, err := p.Search(context.Background(), metadata.Query{Kind: kind, Title: "目标", OriginalTitle: "Target"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -81,8 +81,8 @@ func TestMetadataSearchReturnsAllUniqueCandidates(t *testing.T) {
 			t.Fatalf("应保留全部去重候选及事实：got=%+v want=%+v", got, want)
 		}
 	}
-	if calls.Load() != 8 {
-		t.Fatalf("应完成所有标题和年份变体：%d", calls.Load())
+	if calls.Load() != 4 {
+		t.Fatalf("未知年份应完成所有标题且不增加重复查询：%d", calls.Load())
 	}
 }
 
@@ -203,7 +203,7 @@ func TestMetadataEpisodeGroupsOrderAndIdentity(t *testing.T) {
 	}
 }
 
-func TestMetadataProviderCancellationAndFiniteRetries(t *testing.T) {
+func TestMetadataProviderCancellationAndFirstFailure(t *testing.T) {
 	t.Run("cancel_request", func(t *testing.T) {
 		started := make(chan struct{})
 		p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) { close(started); <-r.Context().Done() })
@@ -222,14 +222,14 @@ func TestMetadataProviderCancellationAndFiniteRetries(t *testing.T) {
 			t.Fatal("取消后请求仍阻塞")
 		}
 	})
-	t.Run("finite_retry", func(t *testing.T) {
+	t.Run("first_failure", func(t *testing.T) {
 		var calls atomic.Int32
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(503) }))
 		defer server.Close()
-		p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, ApiKey: "secret-key", RetryCount: 1})
+		p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, ApiKey: "secret-key"})
 		_, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Show, Title: "节目"})
-		if err == nil || errors.Is(err, metadata.ErrNotFound) || calls.Load() != 2 {
-			t.Fatalf("重试次数或错误错误：%d %v", calls.Load(), err)
+		if err == nil || errors.Is(err, metadata.ErrNotFound) || calls.Load() != 1 {
+			t.Fatalf("首次失败未立即返回：%d %v", calls.Load(), err)
 		}
 	})
 }
@@ -251,29 +251,55 @@ func TestMetadataSearchRejectsNonSearchPayload(t *testing.T) {
 	}
 }
 
-func TestMetadataSearchPreservesYearQueryVariants(t *testing.T) {
+func TestMetadataSearchKeepsKnownYearConstraintForEveryTitle(t *testing.T) {
 	for _, kind := range []metadata.Kind{metadata.Movie, metadata.Show} {
 		t.Run(string(kind), func(t *testing.T) {
 			var requests []string
 			p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
 				args := r.URL.Query()
-				requests = append(requests, args.Get("query")+"|"+args.Get("year"))
-				if kind == metadata.Movie && args.Get("primary_release_year") != args.Get("year") {
-					t.Error("电影年份查询缺少发行年份参数")
+				field := "primary_release_year"
+				if kind == metadata.Show {
+					field = "first_air_date_year"
 				}
-				if args.Get("query") != "Target" || args.Get("year") != "" {
+				requests = append(requests, args.Get("query")+"|"+args.Get(field))
+				if args.Get(field) != "2024" || args.Get("year") != "" {
+					t.Errorf("未按作品首发或首播年份查询: %s", r.URL.RawQuery)
+				}
+				if args.Get("query") != "Target" || args.Get(field) != "" {
 					fmt.Fprint(w, `{"page":1,"total_pages":0,"total_results":0,"results":[]}`)
 					return
 				}
 				fmt.Fprint(w, `{"page":1,"total_pages":1,"total_results":1,"results":[{"id":7,"title":"目标","name":"目标","original_title":"Target","original_name":"Target","release_date":"2023-12-31","first_air_date":"2023-12-31"}]}`)
 			})
 			got, err := p.Search(context.Background(), metadata.Query{Kind: kind, ChineseTitle: "目标", OriginalTitle: "Target", Year: 2024})
-			if err != nil || len(got) != 1 || got[0].Ref.ID != "7" || got[0].Year != 2023 {
-				t.Fatalf("完整查询后的搜索响应丢失：%+v %v", got, err)
+			if !errors.Is(err, metadata.ErrNotFound) || len(got) != 0 {
+				t.Fatalf("已知年份空结果后仍进行了无年份搜索: %+v %v", got, err)
 			}
-			want := []string{"目标|2024", "目标|", "Target|2024", "Target|"}
+			want := []string{"目标|2024", "Target|2024"}
 			if !reflect.DeepEqual(requests, want) {
-				t.Fatalf("查询顺序不正确：%v", requests)
+				t.Fatalf("查询顺序或年份约束不正确: %v", requests)
+			}
+		})
+	}
+}
+
+func TestMetadataSearchUnknownYearDoesNotRestrictReleaseYear(t *testing.T) {
+	for _, kind := range []metadata.Kind{metadata.Movie, metadata.Show} {
+		t.Run(string(kind), func(t *testing.T) {
+			var count int
+			p := testMetadataProvider(t, func(w http.ResponseWriter, r *http.Request) {
+				count++
+				args := r.URL.Query()
+				for _, field := range []string{"year", "primary_release_year", "first_air_date_year"} {
+					if args.Has(field) {
+						t.Errorf("未知年份仍携带 %s", field)
+					}
+				}
+				fmt.Fprint(w, `{"page":1,"total_pages":1,"total_results":1,"results":[{"id":7,"title":"目标","name":"目标","release_date":"2017-01-01","first_air_date":"2017-01-01"}]}`)
+			})
+			got, err := p.Search(context.Background(), metadata.Query{Kind: kind, Title: "目标"})
+			if err != nil || len(got) != 1 || got[0].Year != 2017 || count != 1 {
+				t.Fatalf("未知年份查询不正确: %+v %v 请求=%d", got, err, count)
 			}
 		})
 	}
@@ -299,31 +325,21 @@ func TestMetadataScopeSeparatesResponseConfiguration(t *testing.T) {
 	}
 }
 
-func TestMetadataProviderCancellationDuringRetry(t *testing.T) {
+func TestMetadataProviderRateLimitFailsWithoutWaiting(t *testing.T) {
 	var calls atomic.Int32
-	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			close(started)
-		}
+		calls.Add(1)
 		w.Header().Set("Retry-After", "10")
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer server.Close()
-	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, RetryCount: 3})
-	ctx, cancel := context.WithCancel(context.Background())
+	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { _, err := p.Search(ctx, metadata.Query{Kind: metadata.Show, Title: "节目"}); done <- err }()
-	<-started
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
-			t.Fatalf("取消后仍在重试：%d %v", calls.Load(), err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("重试等待没有被取消")
+	_, err := p.Search(ctx, metadata.Query{Kind: metadata.Show, Title: "节目"})
+	var status *statusError
+	if !errors.As(err, &status) || status.code != http.StatusTooManyRequests || calls.Load() != 1 {
+		t.Fatalf("首次限流错误被退避等待或重试掩盖：请求=%d 错误=%v", calls.Load(), err)
 	}
 }
 
@@ -377,7 +393,7 @@ func TestMetadataProvider404SeparatesSearchFailureFromMissingDetails(t *testing.
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
-	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, RetryCount: 2})
+	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL})
 	_, searchErr := p.Search(context.Background(), metadata.Query{Kind: metadata.Show, Title: "不存在"})
 	if searchErr == nil || errors.Is(searchErr, metadata.ErrNotFound) {
 		t.Fatalf("搜索接口404不得归为没有候选：%v", searchErr)
@@ -409,7 +425,7 @@ func TestMetadataProviderResponseSizeBoundary(t *testing.T) {
 				io.WriteString(w, body)
 			}))
 			defer server.Close()
-			p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, RetryCount: 2})
+			p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL})
 			_, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Movie, Title: "电影"})
 			if err == nil || errors.Is(err, metadata.ErrNotFound) != tc.wantNotFound {
 				t.Fatalf("响应长度边界错误：%d %v", tc.size, err)

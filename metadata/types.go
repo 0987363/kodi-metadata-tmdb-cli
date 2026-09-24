@@ -119,13 +119,13 @@ type Provider interface {
 	Fetch(context.Context, Request) (*Record, error)
 }
 
-// Option 将节目与目标单集绑定为一个来源候选，电影只包含 Work。
+// Option 保存已选中作品与其单集的完整来源事实，电影只包含 Work。
 type Option struct {
 	Episodes []SeriesEpisode `json:"episodes,omitempty"`
 	Work     *Record         `json:"work"`
 }
 
-// Judge 只能返回本次候选集合中的序位；不生成或替换元数据。
+// Judge 只判断作品基本身份并返回本次候选集合中的序位；不生成或替换元数据。
 type Judge interface {
-	Select(context.Context, Request, []Option) (int, error)
+	Select(context.Context, Request, []Candidate) (int, error)
 }

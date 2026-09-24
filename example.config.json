@@ -11,8 +11,7 @@
     "language": "zh-CN",
     "proxy": "",
     "rating": "US",
-    "timeout_seconds": 30,
-    "retry_count": 3
+    "timeout_seconds": 30
   },
   "collector": {
     "skip_folders": [

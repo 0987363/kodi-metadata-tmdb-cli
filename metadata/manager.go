@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +28,7 @@ func NewManager(providers []Provider, ttl time.Duration, judge Judge) *Manager {
 	return &Manager{providers: append([]Provider(nil), providers...), ttl: ttl, judge: judge}
 }
 
-// Resolve 按来源顺序获取并判断完整事实候选，当前来源确认后立即结束。
+// Resolve 先核验作品身份，确认后才获取完整作品与季集事实；任何异常立即返回。
 func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Option, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -63,58 +64,110 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 			continue
 		}
 		supported = true
-		options, err := m.sourceOptions(ctx, p, req, root)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		if errors.Is(err, ErrNotFound) {
-			if req.Ref.ID != "" || req.Ref.Slug != "" {
-				return nil, fmt.Errorf("人工指定作品未找到: %w", ErrConstraintMismatch)
+		fixed := req.Ref.ID != "" || req.Ref.Slug != ""
+		var candidates []Candidate
+		var manualWork *Record
+		var err error
+		if fixed {
+			manualWork, err = m.fetch(ctx, p, Request{Kind: req.Kind, Ref: req.Ref}, root)
+			if err != nil {
+				return nil, fmt.Errorf("%s 人工指定作品获取失败: %w: %w", p.Name(), ErrConstraintMismatch, err)
 			}
-			continue
+			year := 0
+			if len(manualWork.Premiered) >= 4 {
+				year, _ = strconv.Atoi(manualWork.Premiered[:4])
+			}
+			candidates = []Candidate{{Ref: manualWork.Ref, Title: manualWork.Title, OriginalTitle: manualWork.OriginalTitle, Year: year}}
+		} else {
+			candidates, err = m.sourceCandidates(ctx, p, req, root)
+			if err != nil {
+				return nil, fmt.Errorf("%s 搜索: %w", p.Name(), err)
+			}
 		}
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p.Name(), err)
-		}
-		if len(options) == 0 {
-			continue
-		}
-		m.statsMu.Lock()
-		if m.decisions == nil {
-			m.decisions = make(map[string]int64)
-		}
-		m.decisions[p.Name()]++
-		m.statsMu.Unlock()
-		chosen, err := m.judge.Select(ctx, req, options)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrAmbiguous) {
-			continue
-		}
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if chosen < 0 || chosen >= len(options) {
+		if len(candidates) == 0 {
+			continue
+		}
+		chosen := -1
+		if !fixed {
+			chosen, err = matchedHint(req, p.Name(), candidates)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if chosen < 0 {
+			m.statsMu.Lock()
+			if m.decisions == nil {
+				m.decisions = make(map[string]int64)
+			}
+			m.decisions[p.Name()]++
+			m.statsMu.Unlock()
+			chosen, err = m.judge.Select(ctx, req, candidates)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if err != nil {
+				if fixed {
+					return nil, fmt.Errorf("%s 人工指定作品判断失败: %w: %w", p.Name(), ErrConstraintMismatch, err)
+				}
+				return nil, fmt.Errorf("%s 作品判断失败: %w", p.Name(), err)
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if chosen < 0 || chosen >= len(candidates) {
 			return nil, errors.New("判断器返回了候选集合之外的选择")
 		}
-		selected := &options[chosen]
+		selected := candidates[chosen]
 		if req.Kind == Show {
-			detail, err := m.fetchSeries(ctx, p, SeriesRequest{Ref: selected.Work.Ref, Episodes: req.Episodes, Details: true}, root)
+			detail, err := m.fetchSeries(ctx, p, SeriesRequest{Ref: selected.Ref, Episodes: req.Episodes, Details: true}, root)
 			if err != nil {
-				return nil, fmt.Errorf("选中节目详情不完整: %w", err)
+				return nil, fmt.Errorf("%s 选中节目详情不完整: %w", p.Name(), err)
 			}
-			selected = &Option{Work: detail.Work, Episodes: detail.Episodes}
+			return &Option{Work: detail.Work, Episodes: detail.Episodes}, nil
 		}
-		return selected, nil
+		if manualWork != nil {
+			return &Option{Work: manualWork}, nil
+		}
+		work, err := m.fetch(ctx, p, Request{Kind: Movie, Ref: selected.Ref}, root)
+		if err != nil {
+			return nil, fmt.Errorf("%s 选中电影详情: %w", p.Name(), err)
+		}
+		return &Option{Work: work}, nil
 	}
 	if !supported {
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupported, req.Ref.Provider, req.Kind)
 	}
-	if req.Ref.ID != "" || req.Ref.Slug != "" {
-		return nil, fmt.Errorf("人工指定作品未被确认: %w", ErrConstraintMismatch)
-	}
 	return nil, ErrNoMatch
+}
+
+// matchedHint 只核对当前来源、当前对象类型的作品编号，未命中交给候选判断器。
+func matchedHint(req Request, provider string, candidates []Candidate) (int, error) {
+	id := ""
+	for _, hint := range req.Hints {
+		if hint.Provider != provider {
+			continue
+		}
+		if hint.Kind != req.Kind || hint.ID == "" {
+			return -1, errors.New("LLM 作品引用类型或编号无效")
+		}
+		if id != "" && id != hint.ID {
+			return -1, errors.New("LLM 返回同来源的冲突作品引用")
+		}
+		id = hint.ID
+	}
+	if id == "" {
+		return -1, nil
+	}
+	for i, candidate := range candidates {
+		if candidate.Ref.Provider == provider && candidate.Ref.Kind == req.Kind && candidate.Ref.ID == id {
+			return i, nil
+		}
+	}
+	return -1, nil
 }
 
 func (m *Manager) Statistics() map[string]SourceStats {
@@ -139,89 +192,44 @@ func (m *Manager) Statistics() map[string]SourceStats {
 	return result
 }
 
-func (m *Manager) sourceOptions(ctx context.Context, p Provider, req Request, root string) ([]Option, error) {
-	candidates, err := m.sourceCandidates(ctx, p, req, root)
-	if err != nil {
-		return nil, err
-	}
-	if len(candidates) > MaxDecisionCandidates {
-		return nil, fmt.Errorf("候选超过 %d 条上限，请缩小作品定位信息", MaxDecisionCandidates)
-	}
-	options := make([]Option, 0, len(candidates))
-	for _, candidate := range candidates {
-		var option Option
-		if req.Kind == Show {
-			series, fetchErr := m.fetchSeries(ctx, p, SeriesRequest{Ref: candidate.Ref, Episodes: req.Episodes}, root)
-			err = fetchErr
-			if err == nil {
-				option = Option{Work: series.Work, Episodes: series.Episodes}
-			}
-		} else {
-			option.Work, err = m.fetch(ctx, p, Request{Kind: Movie, Ref: candidate.Ref}, root)
-		}
-		if (errors.Is(err, ErrNotFound) || errors.Is(err, ErrConstraintMismatch)) && req.Ref.ID == "" && req.Ref.Slug == "" {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		options = append(options, option)
-	}
-	return options, nil
-}
-
 func (m *Manager) sourceCandidates(ctx context.Context, p Provider, req Request, root string) ([]Candidate, error) {
-	ref := Ref{}
-	if req.Ref.Provider == p.Name() && (req.Ref.ID != "" || req.Ref.Slug != "") {
-		ref = req.Ref
-	} else {
-		for _, hint := range req.Hints {
-			if hint.Provider != p.Name() {
-				continue
-			}
-			if hint.Kind != req.Kind || hint.ID == "" && hint.Slug == "" {
-				return nil, errors.New("LLM 作品引用类型或编号无效")
-			}
-			if ref.Provider != "" && ref != hint {
-				return nil, errors.New("LLM 返回同来源的冲突作品引用")
-			}
-			ref = hint
-		}
-	}
-	if ref.Provider != "" {
-		return []Candidate{{Ref: ref}}, nil
-	}
 	query := req.Query
 	query.Kind = req.Kind
 	if strings.TrimSpace(query.Title+query.ChineseTitle+query.OriginalTitle) == "" {
 		return nil, errors.New("通用 LLM 未提取可搜索的标题")
 	}
-	file := cacheFile(root, p, "search", Request{Kind: req.Kind, Query: query})
+	file := cacheFile(root, p, "identity-search-v1", Request{Kind: req.Kind, Query: query})
 	candidates, hit, err := readCache[[]Candidate](file, m.ttl)
 	if err != nil {
 		return nil, err
 	}
 	if !hit {
 		candidates, err = p.Search(ctx, query)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if errors.Is(err, ErrNotFound) {
+			candidates = nil
+			err = nil
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	distinct := make([]Candidate, 0, len(candidates))
 	seen := map[string]bool{}
-	for _, c := range candidates {
-		if c.Ref.Provider != p.Name() || c.Ref.Kind != req.Kind || c.Ref.ID == "" && c.Ref.Slug == "" {
-			return nil, errors.New("数据源返回了无效的候选引用")
+	for _, candidate := range candidates {
+		if candidate.Ref.Provider != p.Name() || candidate.Ref.Kind != req.Kind || strings.TrimSpace(candidate.Ref.ID) == "" || strings.TrimSpace(candidate.Title) == "" {
+			return nil, errors.New("数据源返回了无效的候选来源、对象、编号或标题")
 		}
-		identity := c.Ref.ID
-		if identity == "" {
-			identity = c.Ref.Slug
-		}
-		if seen[identity] {
+		if seen[candidate.Ref.ID] {
 			continue
 		}
-		seen[identity] = true
-		distinct = append(distinct, c)
+		seen[candidate.Ref.ID] = true
+		distinct = append(distinct, candidate)
+	}
+	if len(distinct) > MaxDecisionCandidates {
+		return nil, fmt.Errorf("候选超过 %d 条上限，请缩小作品定位信息", MaxDecisionCandidates)
 	}
 	if !hit {
 		if err := writeCache(file, m.ttl, distinct); err != nil {

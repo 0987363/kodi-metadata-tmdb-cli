@@ -46,7 +46,7 @@ func TestResolveSeriesJudgesOnceAndFetchesFullSelectedSource(t *testing.T) {
 			t.Fatalf("未返回整剧批量单集: %+v", option)
 		}
 	}
-	if len(a.batches) != 2 || a.batches[0].Details || !a.batches[1].Details || judge.calls != 2 || a.fetchCalls != 0 || b.searchCalls != 0 || len(b.batches) != 0 {
+	if len(a.batches) != 1 || !a.batches[0].Details || judge.calls != 2 || a.fetchCalls != 0 || b.searchCalls != 0 || len(b.batches) != 0 {
 		t.Fatalf("批量获取/判断次数错误: a=%+v b=%+v judge=%+v", a, b, judge)
 	}
 }
@@ -71,7 +71,7 @@ func TestResolveSeriesErrorsDoNotBecomeUnmatched(t *testing.T) {
 				req.Ref = Ref{Provider: "tmdb", Kind: Show, ID: "42"}
 			}
 			_, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), req, t.TempDir())
-			if err == nil || errors.Is(err, ErrNotFound) || judge.calls != 0 || b.searchCalls != 0 {
+			if err == nil || errors.Is(err, ErrNoMatch) || judge.calls != 1 || b.searchCalls != 0 {
 				t.Fatalf("错误变成未匹配: %v %+v", err, judge)
 			}
 		})

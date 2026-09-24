@@ -91,7 +91,7 @@ func normalizeEndpoint(base string) (string, error) {
 	return endpoint.String(), nil
 }
 
-func (c *Client) Select(ctx context.Context, request metadata.Request, options []metadata.Option) (int, error) {
+func (c *Client) Select(ctx context.Context, request metadata.Request, options []metadata.Candidate) (int, error) {
 	if c == nil || c.httpClient == nil {
 		return -1, errors.New("Jev 客户端未初始化")
 	}
@@ -102,8 +102,8 @@ func (c *Client) Select(ctx context.Context, request metadata.Request, options [
 		return -1, errors.New("Jev 最多支持 254 个真实候选及一个 none 选项")
 	}
 	for i, option := range options {
-		if option.Work == nil {
-			return -1, fmt.Errorf("Jev 候选 c%d 缺少作品详情", i)
+		if strings.TrimSpace(option.Title) == "" || strings.TrimSpace(option.Ref.Provider) == "" || strings.TrimSpace(option.Ref.ID) == "" || option.Ref.Kind != metadata.Movie && option.Ref.Kind != metadata.Show {
+			return -1, fmt.Errorf("Jev 候选 c%d 缺少合法的作品基本身份", i)
 		}
 	}
 	body, err := json.Marshal(buildEvaluation(c.model, request, options))

@@ -106,7 +106,8 @@ func (l *logger) FatalF(format string, v ...any) {
 }
 
 func (l *logger) print(level logLevel, v ...any) {
-	if level >= l.level {
+	// 运行异常必须保留，不能被 fatal 级别配置静默过滤。
+	if level == ERROR || level >= l.level {
 		l.write(level, fmt.Sprint(v...))
 		if l.mode != config.LogModeLogfile {
 			log.Print(v...)
@@ -115,7 +116,8 @@ func (l *logger) print(level logLevel, v ...any) {
 }
 
 func (l *logger) printf(level logLevel, format string, v ...any) {
-	if level >= l.level {
+	// 运行异常必须保留，不能被 fatal 级别配置静默过滤。
+	if level == ERROR || level >= l.level {
 		l.write(level, fmt.Sprintf(format, v...))
 		if l.mode != config.LogModeLogfile {
 			log.Printf(levelMap[level]+" "+format, v...)

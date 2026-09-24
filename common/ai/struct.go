@@ -26,7 +26,7 @@ type ClientStats struct {
 	DecisionRequests int64
 }
 
-// ParseResult 只保存识别线索，nil 季集号表示未知，季号零仍是特别篇。
+// ParseResult 只保存识别线索，网站作品编号未经核验；nil 季集号表示未知，季号零仍是特别篇。
 type ParseResult struct {
 	TMDBID       string `json:"tmdb_id,omitempty"`
 	TheTVDBID    string `json:"thetvdb_id,omitempty"`

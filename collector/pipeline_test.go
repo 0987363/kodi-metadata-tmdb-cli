@@ -1,12 +1,16 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fengqi/kodi-metadata-tmdb-cli/artwork"
 	"fengqi/kodi-metadata-tmdb-cli/common/ai"
 	"fengqi/kodi-metadata-tmdb-cli/config"
 	"fengqi/kodi-metadata-tmdb-cli/metadata"
+	"fengqi/kodi-metadata-tmdb-cli/utils"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,7 +42,7 @@ func (p *runSource) FetchSeries(_ context.Context, r metadata.SeriesRequest) (*m
 
 type runJudge struct{ calls int }
 
-func (j *runJudge) Select(_ context.Context, _ metadata.Request, _ []metadata.Option) (int, error) {
+func (j *runJudge) Select(_ context.Context, _ metadata.Request, _ []metadata.Candidate) (int, error) {
 	j.calls++
 	return 0, nil
 }
@@ -84,7 +88,7 @@ func TestRunUsesAIClassificationInMixedDirectory(t *testing.T) {
 	if !strings.Contains(string(movie), "<movie>") || !strings.Contains(string(episode), "<season>0</season>") {
 		t.Fatalf("AI类型或零季丢失: %s %s", movie, episode)
 	}
-	if calls != 1 || judge.calls != 2 || source.batches != 2 {
+	if calls != 1 || judge.calls != 2 || source.batches != 1 {
 		t.Fatalf("重复提取/逐集判断: model=%d judge=%d batches=%d", calls, judge.calls, source.batches)
 	}
 }
@@ -132,5 +136,155 @@ func TestRunRejectsOutputCollisionsBeforeSourceRequests(t *testing.T) {
 				t.Fatalf("已有NFO被覆盖: %s", data)
 			}
 		})
+	}
+}
+
+type failingRunSource struct {
+	runSource
+	queries     []string
+	searchError error
+	fetchError  error
+	imageURL    string
+}
+
+func (p *failingRunSource) Search(ctx context.Context, q metadata.Query) ([]metadata.Candidate, error) {
+	p.queries = append(p.queries, q.Title)
+	if q.Title == "无候选作品" {
+		return nil, metadata.ErrNotFound
+	}
+	if p.searchError != nil {
+		return nil, p.searchError
+	}
+	return p.runSource.Search(ctx, q)
+}
+
+func (p *failingRunSource) Fetch(ctx context.Context, req metadata.Request) (*metadata.Record, error) {
+	if p.fetchError != nil {
+		return nil, p.fetchError
+	}
+	record, err := p.runSource.Fetch(ctx, req)
+	if p.imageURL != "" {
+		record.Artwork = []metadata.Artwork{{Kind: "poster", URL: p.imageURL}}
+	}
+	return record, err
+}
+
+func TestRunStopsImmediatelyAfterFirstWorkFailure(t *testing.T) {
+	for _, stage := range []string{"search", "detail", "image", "write", "unmatched_before_failure"} {
+		t.Run(stage, func(t *testing.T) {
+			oldCollector, oldScraper := config.Collector, config.Scraper
+			t.Cleanup(func() { config.Collector, config.Scraper = oldCollector, oldScraper })
+			config.Collector, config.Scraper = &config.CollectorConfig{}, &config.ScraperConfig{}
+			root := t.TempDir()
+			paths := []string{"first.mkv", "second.mkv"}
+			items := []map[string]any{{"relative_path": "first.mkv", "media_type": "movie", "title": "失败作品"}, {"relative_path": "second.mkv", "media_type": "movie", "title": "后续作品"}}
+			if stage == "unmatched_before_failure" {
+				paths = append([]string{"empty.mkv"}, paths...)
+				items = append([]map[string]any{{"relative_path": "empty.mkv", "media_type": "movie", "title": "无候选作品"}}, items...)
+			}
+			for _, path := range paths {
+				if err := os.WriteFile(filepath.Join(root, path), nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stage == "write" {
+				if err := os.Mkdir(filepath.Join(root, "first.nfo"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			modelCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				modelCalls++
+				payload, _ := json.Marshal(map[string]any{"items": items})
+				json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(payload)}}}})
+			}))
+			defer server.Close()
+			client, err := ai.New(config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "test", Model: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := &failingRunSource{}
+			switch stage {
+			case "search", "unmatched_before_failure":
+				source.searchError = errors.New("搜索异常")
+			case "detail":
+				source.fetchError = errors.New("详情异常")
+			case "image":
+				source.imageURL = "https://images.invalid/poster.jpg"
+			}
+			err = Run(context.Background(), root, client, metadata.NewManager([]metadata.Provider{source}, 0, &runJudge{}), &artwork.Downloader{})
+			if err == nil {
+				t.Fatal("作品失败未返回异常")
+			}
+			if strings.Contains(strings.Join(source.queries, ","), "后续作品") {
+				t.Fatalf("失败后仍请求后续作品: %v", source.queries)
+			}
+			if modelCalls != 1 {
+				t.Fatalf("失败后进入本地整理: %d", modelCalls)
+			}
+			if _, err := os.Stat(filepath.Join(root, "second.nfo")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("失败后写入后续作品: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunLogsOriginalFailureOnceWithoutSecrets(t *testing.T) {
+	oldModels, oldTMDB, oldLog, oldLogger := config.LLMs, config.Tmdb, config.Log, utils.Logger
+	oldOutput := log.Writer()
+	t.Cleanup(func() {
+		config.LLMs, config.Tmdb, config.Log, utils.Logger = oldModels, oldTMDB, oldLog, oldLogger
+		log.SetOutput(oldOutput)
+	})
+	config.LLMs = []config.LLMConfig{{ApiKey: "model-secret"}}
+	config.Tmdb = &config.TmdbConfig{ApiKey: "tmdb-secret"}
+	config.Log = &config.LogConfig{Mode: config.LogModeStdout, Level: config.LogLevelDebug}
+	utils.InitLogger()
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	original := errors.New("请求异常 model-secret tmdb-secret")
+	if message := redactRunError(original); strings.Contains(message, "-secret") || !strings.Contains(message, "请求异常") {
+		t.Fatalf("脱敏错误: %s", message)
+	}
+	err := Run(context.Background(), t.TempDir(), nil, nil, nil)
+	if err == nil || strings.Count(output.String(), err.Error()) != 1 {
+		t.Fatalf("异常没有唯一日志: %v %s", err, output.String())
+	}
+}
+
+func TestRunStopsLocalWritesAfterFirstFailure(t *testing.T) {
+	oldCollector, oldScraper := config.Collector, config.Scraper
+	t.Cleanup(func() { config.Collector, config.Scraper = oldCollector, oldScraper })
+	config.Collector, config.Scraper = &config.CollectorConfig{}, &config.ScraperConfig{}
+	root := t.TempDir()
+	for _, path := range []string{"first.mkv", "second.mkv"} {
+		if err := os.WriteFile(filepath.Join(root, path), nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "first.nfo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		payload := `{"items":[{"relative_path":"first.mkv","media_type":"movie","title":"首部"},{"relative_path":"second.mkv","media_type":"movie","title":"后续"}]}`
+		if calls == 2 {
+			payload = `{"items":[{"relative_path":"first.mkv","title":"首部","plot":"","genres":[]},{"relative_path":"second.mkv","title":"后续","plot":"","genres":[]}]}`
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": payload}}}})
+	}))
+	defer server.Close()
+	client, err := ai.New(config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "test", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &failingRunSource{searchError: metadata.ErrNotFound}
+	err = Run(context.Background(), root, client, metadata.NewManager([]metadata.Provider{source}, 0, &runJudge{}), &artwork.Downloader{})
+	if err == nil || calls != 2 {
+		t.Fatalf("本地写入失败未返回或正常空候选未整理: %v 请求=%d", err, calls)
+	}
+	if _, err := os.Stat(filepath.Join(root, "second.nfo")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("本地首部写入失败后仍写入后续: %v", err)
 	}
 }

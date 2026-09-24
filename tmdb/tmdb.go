@@ -1,9 +1,6 @@
 package tmdb
 
-import (
-	"fmt"
-	"time"
-)
+import "fmt"
 
 const (
 	ApiSearchTv       = "/3/search/tv"
@@ -13,10 +10,9 @@ const (
 	ApiMovieDetail    = "/3/movie/%d"
 )
 
-// statusError 由 Provider 请求层返回，保留状态码与限流等待时间。
+// statusError 由 Provider 请求层返回，保留请求失败的状态码。
 type statusError struct {
-	code       int
-	retryAfter time.Duration
+	code int
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("request tmdb status code: %d", e.code) }

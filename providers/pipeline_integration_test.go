@@ -120,6 +120,7 @@ func (f *pipelineFixture) handle(w http.ResponseWriter, r *http.Request) {
 			f.t.Error("JEV 凭据错误")
 		}
 		var body struct {
+			State     json.RawMessage `json:"state"`
 			Questions map[string]struct {
 				Criteria map[string]json.RawMessage `json:"criteria"`
 			} `json:"questions"`
@@ -128,6 +129,16 @@ func (f *pipelineFixture) handle(w http.ResponseWriter, r *http.Request) {
 			f.t.Error(err)
 			w.WriteHeader(400)
 			return
+		}
+		for _, forbidden := range []string{`"episodes"`, `"files"`, `"season"`, `"episode"`, `"group"`} {
+			if strings.Contains(string(body.State), forbidden) {
+				f.t.Errorf("判断上下文泄漏季集字段：%s", forbidden)
+			}
+			for key, raw := range body.Questions["select"].Criteria {
+				if key != "none" && strings.Contains(string(raw), forbidden) {
+					f.t.Errorf("作品候选泄漏季集字段：%s", forbidden)
+				}
+			}
 		}
 		if f.judgeStatus != 0 {
 			w.WriteHeader(f.judgeStatus)
@@ -210,12 +221,18 @@ func readNFO(t *testing.T, p string) string {
 	return string(b)
 }
 func tmdbMovie(r *http.Request) (any, bool) {
+	if r.URL.Path == "/3/search/movie" {
+		return map[string]any{"page": 1, "total_pages": 1, "total_results": 1, "results": []any{map[string]any{"id": 42, "title": "Source Movie", "release_date": "2020-01-01"}}}, true
+	}
 	if r.URL.Path == "/3/movie/42" {
 		return map[string]any{"id": 42, "title": "Source Movie", "runtime": 123}, true
 	}
 	return nil, false
 }
 func tmdbShow(r *http.Request) (any, bool) {
+	if r.URL.Path == "/3/search/tv" {
+		return map[string]any{"page": 1, "total_pages": 1, "total_results": 1, "results": []any{map[string]any{"id": 42, "name": "Source Show", "first_air_date": "2017-01-01"}}}, true
+	}
 	if r.URL.Path != "/3/tv/42" {
 		return nil, false
 	}
@@ -248,7 +265,7 @@ func TestPipelineMovieNamedModelsAndSourceFact(t *testing.T) {
 	f := fixturePipeline(t)
 	f.judgeType = "openai"
 	f.file("Movie.mkv")
-	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint","tmdb_id":"42"}]}`
+	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint"}]}`
 	f.source = tmdbMovie
 	if err := f.run(); err != nil {
 		t.Fatal(err)
@@ -266,7 +283,7 @@ func TestPipelineShowBatchAndJEV(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Show/Season 01/Show.S01E01.mkv")
 	f.file("Show/Season 01/Show.S01E02.mkv")
-	f.analysis = `{"items":[{"relative_path":"Show/Season 01/Show.S01E01.mkv","media_type":"tv","series_root":"Show","title":"Show","tmdb_id":"42","season":1,"episode":1},{"relative_path":"Show/Season 01/Show.S01E02.mkv","media_type":"tv","series_root":"Show","title":"Show","tmdb_id":"42","season":1,"episode":2}]}`
+	f.analysis = `{"items":[{"relative_path":"Show/Season 01/Show.S01E01.mkv","media_type":"tv","series_root":"Show","title":"Show","season":1,"episode":1},{"relative_path":"Show/Season 01/Show.S01E02.mkv","media_type":"tv","series_root":"Show","title":"Show","season":1,"episode":2}]}`
 	f.source = tmdbShow
 	if err := f.run(); err != nil {
 		t.Fatal(err)
@@ -358,31 +375,39 @@ func TestPipelineMalformedClassificationPreservesNFO(t *testing.T) {
 	}
 }
 
-func TestPipelineJudgeNoneAdvancesToInputOnlyLocal(t *testing.T) {
+func TestPipelineJudgeNoneStopsWithoutLocalOutput(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Unmatched.mkv")
-	f.analysis = `{"items":[{"relative_path":"Unmatched.mkv","media_type":"movie","title":"Unmatched","tmdb_id":"42"}]}`
-	f.local = `{"items":[{"relative_path":"Unmatched.mkv","title":"Unmatched File","plot":"","genres":[]}]}`
+	f.analysis = `{"items":[{"relative_path":"Unmatched.mkv","media_type":"movie","title":"Unmatched"}]}`
 	f.source = tmdbMovie
 	f.choice = "none"
-	if err := f.run(); err != nil {
+	prior := filepath.Join(f.root, "Unmatched.nfo")
+	if err := os.WriteFile(prior, []byte("original"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	got := readNFO(t, filepath.Join(f.root, "Unmatched.nfo"))
-	if !strings.Contains(got, "Unmatched File") || !strings.Contains(got, "type=\"local\"") || strings.Contains(got, ">42</uniqueid>") {
-		t.Fatalf("none 未生成本地身份: %s", got)
+	if err := f.run(); err == nil {
+		t.Fatal("Jev 拒绝应退出")
 	}
-	tasks, _ := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity jev describe_local_metadata]" {
-		t.Fatalf("none 任务链错误: %v", tasks)
+	if readNFO(t, prior) != "original" {
+		t.Fatal("拒绝后仍写入本地 NFO")
+	}
+	tasks, requests := f.snapshot()
+	if fmt.Sprint(tasks) != "[extract_media_identity jev]" {
+		t.Fatalf("拒绝后继续模型任务：%v", tasks)
+	}
+	for _, request := range requests {
+		if strings.HasPrefix(request, "/3/movie/") {
+			t.Fatalf("判断前或拒绝后请求了详情：%v", requests)
+		}
 	}
 }
+
 func TestPipelineJudgeFailurePreservesPreviousNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Movie.mkv")
 	nfo := filepath.Join(f.root, "Movie.nfo")
 	_ = os.WriteFile(nfo, []byte("original"), 0644)
-	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint","tmdb_id":"42"}]}`
+	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint"}]}`
 	f.source = tmdbMovie
 	f.judgeStatus = 429
 	if err := f.run(); err == nil {
@@ -399,6 +424,9 @@ func TestPipelineTMDbMalformedBatchPreservesPreviousShowNFO(t *testing.T) {
 	_ = os.WriteFile(nfo, []byte("original"), 0644)
 	f.analysis = `{"items":[{"relative_path":"Show/Show.S01E01.mkv","media_type":"tv","series_root":"Show","title":"Show","tmdb_id":"42","season":1,"episode":1}]}`
 	f.source = func(r *http.Request) (any, bool) {
+		if r.URL.Path == "/3/search/tv" {
+			return tmdbShow(r)
+		}
 		if r.URL.Path == "/3/tv/42" {
 			return map[string]any{"id": 42, "name": "Show", "season/1": map[string]any{"season_number": 1, "episodes": []any{map[string]any{"id": 101, "show_id": 42, "season_number": 1, "episode_number": 1, "name": "Episode"}}}}, true
 		}
@@ -420,7 +448,7 @@ func TestCLIProcessesExactlyOnePathWithNamedModels(t *testing.T) {
 	f := fixturePipeline(t)
 	f.judgeType = "openai"
 	f.file("Movie.mkv")
-	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint","tmdb_id":"42"}]}`
+	f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint"}]}`
 	f.source = tmdbMovie
 	f.configure()
 	settings := config.Config{LLMs: config.LLMs, Scraper: config.Scraper, Tmdb: config.Tmdb, TheTVDB: config.TheTVDB, Collector: config.Collector}
@@ -454,12 +482,11 @@ func TestCLIProcessesExactlyOnePathWithNamedModels(t *testing.T) {
 		t.Fatalf("重复 path 未拒绝: %v %s", err, output)
 	}
 }
-func TestPipelineOrderedSourcesNoneAdvancesThenStops(t *testing.T) {
+func TestPipelineOrderedSourcesEmptyAdvancesThenStops(t *testing.T) {
 	f := fixturePipeline(t)
 	f.providers = []string{"tmdb", "thetvdb"}
-	f.choices = []string{"none", "c0"}
 	f.file("Show/Show.S01E02.mkv")
-	f.analysis = `{"items":[{"relative_path":"Show/Show.S01E02.mkv","media_type":"tv","series_root":"Show","title":"坑王驾到","tmdb_id":"42","thetvdb_id":"371065","season":1,"episode":2}]}`
+	f.analysis = `{"items":[{"relative_path":"Show/Show.S01E02.mkv","media_type":"tv","series_root":"Show","title":"坑王驾到","season":1,"episode":2}]}`
 	series, err := os.ReadFile(filepath.Join("..", "thetvdb", "testdata", "series.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -474,6 +501,10 @@ func TestPipelineOrderedSourcesNoneAdvancesThenStops(t *testing.T) {
 	}
 	f.rawSource = func(w http.ResponseWriter, r *http.Request) bool {
 		switch r.URL.Path {
+		case "/search":
+			fmt.Fprintf(w, `<script>window.TVDB_SEARCH_URL = '%s/web/search/queries';</script>`, f.server.URL)
+		case "/web/search/queries":
+			_, _ = w.Write([]byte(`{"results":[{"page":0,"nbPages":1,"nbHits":1,"hitsPerPage":100,"exhaustiveNbHits":true,"hits":[{"id":371065,"name":"坑王驾到","slug":"26882341-show","type":"series","year":"2016"}]}]}`))
 		case "/dereferrer/series/371065":
 			http.Redirect(w, r, "/series/26882341-show", 302)
 		case "/series/26882341-show":
@@ -490,6 +521,9 @@ func TestPipelineOrderedSourcesNoneAdvancesThenStops(t *testing.T) {
 		return true
 	}
 	f.source = func(r *http.Request) (any, bool) {
+		if r.URL.Path == "/3/search/tv" {
+			return map[string]any{"page": 1, "total_pages": 0, "total_results": 0, "results": []any{}}, true
+		}
 		if body, ok := tmdbShow(r); ok {
 			return body, true
 		}
@@ -503,15 +537,15 @@ func TestPipelineOrderedSourcesNoneAdvancesThenStops(t *testing.T) {
 		t.Fatalf("后续来源单集未采用: %s", got)
 	}
 	tasks, requests := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity jev jev]" {
+	if fmt.Sprint(tasks) != "[extract_media_identity jev]" {
 		t.Fatalf("未逐来源判断: %v", tasks)
 	}
 	first, second := -1, -1
 	for i, p := range requests {
-		if strings.HasPrefix(p, "/3/tv/42?") {
+		if strings.HasPrefix(p, "/3/search/tv?") {
 			first = i
 		}
-		if strings.HasPrefix(p, "/dereferrer/series/") && second < 0 {
+		if strings.HasPrefix(p, "/search?") && second < 0 {
 			second = i
 		}
 	}
@@ -533,11 +567,11 @@ func TestPipelineFirstConfirmedSourceStopsBeforeSecond(t *testing.T) {
 		t.Fatalf("首来源单集未写入: %s", got)
 	}
 	tasks, requests := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity jev]" {
+	if fmt.Sprint(tasks) != "[extract_media_identity]" {
 		t.Fatalf("首来源确认后仍判断: %v", tasks)
 	}
 	for _, p := range requests {
-		if strings.Contains(p, "/series/") || strings.Contains(p, "/search/") {
+		if strings.Contains(p, "/series/") || strings.HasPrefix(p, "/search?") {
 			t.Fatalf("首来源确认后访问后续来源: %v", requests)
 		}
 	}
@@ -584,7 +618,7 @@ func TestPipelineSearchPageFailureDoesNotBecomeLocalMiss(t *testing.T) {
 	}
 }
 
-func TestPipelineGeneralJudgeNoneUsesLocalAndFailurePreservesNFO(t *testing.T) {
+func TestPipelineGeneralJudgeNoneAndFailurePreserveNFO(t *testing.T) {
 	for _, scenario := range []string{"none", "error"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := fixturePipeline(t)
@@ -592,7 +626,7 @@ func TestPipelineGeneralJudgeNoneUsesLocalAndFailurePreservesNFO(t *testing.T) {
 			f.file("Movie.mkv")
 			nfo := filepath.Join(f.root, "Movie.nfo")
 			_ = os.WriteFile(nfo, []byte("original"), 0644)
-			f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint","tmdb_id":"42"}]}`
+			f.analysis = `{"items":[{"relative_path":"Movie.mkv","media_type":"movie","title":"Hint"}]}`
 			f.source = tmdbMovie
 			f.local = `{"items":[{"relative_path":"Movie.mkv","title":"Local Movie","plot":"","genres":[]}]}`
 			if scenario == "none" {
@@ -603,13 +637,10 @@ func TestPipelineGeneralJudgeNoneUsesLocalAndFailurePreservesNFO(t *testing.T) {
 			err := f.run()
 			got := readNFO(t, nfo)
 			tasks, _ := f.snapshot()
-			if scenario == "none" {
-				if err != nil || !strings.Contains(got, "Local Movie") || !strings.Contains(got, "type=\"local\"") || fmt.Sprint(tasks) != "[extract_media_identity select_metadata_candidate describe_local_metadata]" {
-					t.Fatalf("通用判断 none 未进入本地路径: %v %s %v", err, got, tasks)
-				}
-			} else if err == nil || got != "original" || fmt.Sprint(tasks) != "[extract_media_identity select_metadata_candidate]" {
-				t.Fatalf("通用判断错误未保护 NFO: %v %s %v", err, got, tasks)
+			if err == nil || got != "original" || fmt.Sprint(tasks) != "[extract_media_identity select_metadata_candidate]" {
+				t.Fatalf("通用判断拒绝或错误未立即退出保护 NFO: %v %s %v", err, got, tasks)
 			}
+
 		})
 	}
 }

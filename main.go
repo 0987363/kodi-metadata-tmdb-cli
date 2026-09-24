@@ -101,7 +101,6 @@ func main() {
 		os.Exit(1)
 	}
 	if err := collector.Run(context.Background(), options.path, extractor, manager, images); err != nil {
-		utils.Logger.Error(err)
 		os.Exit(1)
 	}
 }

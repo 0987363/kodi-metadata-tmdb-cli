@@ -131,3 +131,93 @@ func TestSearchRejectsMalformedFilteredHits(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchAppliesKnownYearToCompleteSourceCandidates(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		year int
+		ids  []string
+	}{
+		{"known year", 2017, []string{"2"}},
+		{"different year", 1900, nil},
+		{"unknown year", 0, []string{"1", "2", "3"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests []string
+			p := serveSearch(t, func(w http.ResponseWriter, params searchParams) {
+				requests = append(requests, fmt.Sprintf("%s|%d", params.Query, params.Page))
+				if params.Filters != "type:series" {
+					t.Errorf("发送了未验证的年份服务端过滤规则: %q", params.Filters)
+				}
+				fmt.Fprint(w, `{"results":[{"page":0,"nbPages":1,"nbHits":3,"hitsPerPage":20,"exhaustiveNbHits":true,"hits":[{"id":1,"name":"黄皮子坟","type":"series","year":"2021"},{"id":2,"name":"鬼吹灯之黄皮子坟","type":"series","year":"2017"},{"id":3,"name":"黄皮子坟","type":"series","year":""}]}]}`)
+			})
+			got, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Show, Title: "黄皮子坟", Year: test.year})
+			if len(test.ids) == 0 {
+				if !errors.Is(err, metadata.ErrNotFound) || len(got) != 0 {
+					t.Fatalf("无同年候选必须正常未找到: %+v %v", got, err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			var ids []string
+			for _, candidate := range got {
+				ids = append(ids, candidate.Ref.ID)
+			}
+			if !reflect.DeepEqual(ids, test.ids) || !reflect.DeepEqual(requests, []string{"黄皮子坟|0"}) {
+				t.Fatalf("年份条件或查询次数不符: 候选=%v 请求=%v", ids, requests)
+			}
+		})
+	}
+}
+
+func TestSearchChecksAllPagesBeforeFilteringKnownYear(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		second string
+		fails  bool
+	}{
+		{"later matching work", `{"results":[{"page":1,"nbPages":2,"nbHits":2,"hitsPerPage":1,"exhaustiveNbHits":true,"hits":[{"id":2,"name":"目标","type":"series","year":"2017"}]}]}`, false},
+		{"later malformed page", `{"results":[{"page":1,"nbPages":2,"nbHits":2,"hitsPerPage":1,"exhaustiveNbHits":true,"hits":[null]}]}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var pages []int
+			p := serveSearch(t, func(w http.ResponseWriter, params searchParams) {
+				pages = append(pages, params.Page)
+				if params.Page == 0 {
+					fmt.Fprint(w, `{"results":[{"page":0,"nbPages":2,"nbHits":2,"hitsPerPage":1,"exhaustiveNbHits":true,"hits":[{"id":1,"name":"其他年份","type":"series","year":"2000"}]}]}`)
+					return
+				}
+				fmt.Fprint(w, test.second)
+			})
+			got, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Show, Title: "目标", Year: 2017})
+			if test.fails {
+				if err == nil || errors.Is(err, metadata.ErrNotFound) || len(got) != 0 {
+					t.Fatalf("异年页之后的异常被隐藏: %+v %v", got, err)
+				}
+			} else if err != nil || len(got) != 1 || got[0].Ref.ID != "2" {
+				t.Fatalf("遗漏后页同年候选: %+v %v", got, err)
+			}
+			if !reflect.DeepEqual(pages, []int{0, 1}) {
+				t.Fatalf("未完成分页: %v", pages)
+			}
+		})
+	}
+}
+
+func TestSearchYearFilterDoesNotBypassCombinedCandidateLimit(t *testing.T) {
+	p := serveSearch(t, func(w http.ResponseWriter, params searchParams) {
+		firstID := 1
+		if params.Query == "Original" {
+			firstID = 128
+		}
+		hits := make([]map[string]any, 128)
+		for i := range hits {
+			hits[i] = map[string]any{"id": firstID + i, "name": "异年作品", "type": "series", "year": "2000"}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"results": []any{map[string]any{"page": 0, "nbPages": 1, "nbHits": len(hits), "hitsPerPage": 128, "exhaustiveNbHits": true, "hits": hits}}})
+	})
+	got, err := p.Search(context.Background(), metadata.Query{Kind: metadata.Show, Title: "目标", OriginalTitle: "Original", Year: 2017})
+	if err == nil || errors.Is(err, metadata.ErrNotFound) || len(got) != 0 {
+		t.Fatalf("年份过滤绕过完整候选总量限制: %+v %v", got, err)
+	}
+}

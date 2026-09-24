@@ -17,7 +17,7 @@ func TestConfigurationRejectsRemovedAndUnknownFields(t *testing.T) {
 		`{"collector":{"cron_seconds":60}}`, `{"collector":{"cron_scan":true}}`,
 		`{"collector":{"cron_scan_boot":true}}`, `{"collector":{"movies_dir":[]}}`,
 		`{"collector":{"shows_dir":[]}}`,
-		`{"unknown":true}`, `{"tmdb":{"unknown":true}}`,
+		`{"unknown":true}`, `{"tmdb":{"unknown":true}}`, `{"tmdb":{"retry_count":0}}`,
 		`{"thetvdb":{"unknown":true}}`, `{"log":{"unknown":true}}`,
 		`{"llms":[{"name":"extract","type":"openai","match_mode":1}]}`,
 		`{"llms":[{"name":"extract","type":"openai","search_mode":1}]}`,

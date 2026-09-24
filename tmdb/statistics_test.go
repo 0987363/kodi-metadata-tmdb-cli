@@ -37,12 +37,12 @@ func TestStatisticsCountsActualBatchRequestsAndCacheReuse(t *testing.T) {
 		}
 	}
 	got := p.(interface{ Statistics() metadata.SourceStats }).Statistics()
-	if received.Load() != 1 || got.HTTPAttempts != 1 || got.BatchRequests != 1 || got.Retries != 0 || got.DetailRequests != 0 {
+	if received.Load() != 1 || got.HTTPAttempts != 1 || got.BatchRequests != 1 || got.DetailRequests != 0 {
 		t.Fatalf("缓存复用或批量计数错误：请求=%d 统计=%+v", received.Load(), got)
 	}
 }
 
-func TestStatisticsCountsRetryAttempts(t *testing.T) {
+func TestStatisticsCountsFirstFailureWithoutRetry(t *testing.T) {
 	var received atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if received.Add(1) == 1 {
@@ -52,13 +52,13 @@ func TestStatisticsCountsRetryAttempts(t *testing.T) {
 		fmt.Fprint(w, `{}`)
 	}))
 	defer server.Close()
-	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, ApiKey: "secret", Language: "zh-CN", RetryCount: 1, TimeoutSeconds: 3}).(*metadataProvider)
+	p := NewMetadataProvider(&config.TmdbConfig{ApiHost: server.URL, ApiKey: "secret", Language: "zh-CN", TimeoutSeconds: 3}).(*metadataProvider)
 	var result map[string]any
-	if err := p.requestJSON(context.Background(), "/3/search/movie", url.Values{}, &result); err != nil {
-		t.Fatal(err)
+	if err := p.requestJSON(context.Background(), "/3/search/movie", url.Values{}, &result); err == nil {
+		t.Fatal("首次失败被重试成功掩盖")
 	}
 	got := p.Statistics()
-	if received.Load() != 2 || got.HTTPAttempts != 2 || got.Retries != 1 || got.SearchRequests != 2 {
-		t.Fatalf("重试请求计数错误：请求=%d 统计=%+v", received.Load(), got)
+	if received.Load() != 1 || got.HTTPAttempts != 1 || got.SearchRequests != 1 {
+		t.Fatalf("首次失败请求计数错误：请求=%d 统计=%+v", received.Load(), got)
 	}
 }

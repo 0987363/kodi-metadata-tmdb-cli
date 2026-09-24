@@ -20,10 +20,10 @@ import (
 
 const acceptedResponse = `{"model":"jev-1.13.0","answers":{"select":{"type":"choice","choice":"c1","probabilities":{"c0":0.4,"c1":0.6,"none":0},"confidence":0.1},"match_0":{"type":"noul","noul":0.95},"match_1":{"type":"noul","noul":0.98}},"usage":{"input_tokens":500,"output_tokens":70}}`
 
-func candidateOptions() []metadata.Option {
-	return []metadata.Option{
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02", Actors: []metadata.Actor{{Name: "不应发送的演员"}}, Artwork: []metadata.Artwork{{URL: "https://image.example/should-not-send.jpg"}}}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "100"}, Title: "试播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}}, {Key: metadata.EpisodeKey{Season: 1, Episode: 1}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "101"}, Title: "第一集", SeasonNumber: 1, EpisodeNumber: 1}}}},
-		{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Plot: "节目介绍", Premiered: "2020-01-02"}, Episodes: []metadata.SeriesEpisode{{Key: metadata.EpisodeKey{Season: 0, Episode: 2}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "100"}, Title: "試播集", SeasonNumber: 0, EpisodeNumber: 2, Premiered: "2020-01-03"}}, {Key: metadata.EpisodeKey{Season: 1, Episode: 1}, Record: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Episode, ID: "101"}, Title: "第一集", SeasonNumber: 1, EpisodeNumber: 1}}}},
+func workCandidates() []metadata.Candidate {
+	return []metadata.Candidate{
+		{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Year: 2020},
+		{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Title: "同名节目", OriginalTitle: "Original Show", Year: 2020},
 	}
 }
 
@@ -31,7 +31,7 @@ func sourceRequest() metadata.Request {
 	return metadata.Request{Path: "/library/同名节目", Files: []string{"Season 0/Original.Show.S00E02.mkv", "Season 1/Original.Show.S01E01.mkv"}, Kind: metadata.Show, Query: metadata.Query{Kind: metadata.Show, Title: "同名节目", OriginalTitle: "Original Show", Year: 2020}, Episodes: []metadata.EpisodeKey{{Season: 0, Episode: 2}, {Season: 1, Episode: 1}}, Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "42"}, Hints: []metadata.Ref{{Provider: "tmdb", Kind: metadata.Show, ID: "42"}}}
 }
 
-func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
+func TestSelectUsesChoiceAndNoulForBasicWorkIdentity(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -58,11 +58,8 @@ func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Error(err)
 		}
-		if request.Model != "jev-latest" || len(request.State.Files) != 2 || len(request.State.Episodes) != 2 || request.State.Episodes[0].Season != 0 || request.State.Episodes[1].Episode != 1 || request.State.Ref.Provider != "thetvdb" || len(request.State.Hints) != 1 {
-			t.Errorf("模型或输入证据错误: %#v", request)
-		}
-		if !strings.Contains(string(body), `"season":0`) {
-			t.Error("输入证据丢失第 0 季")
+		if request.Model != "jev-latest" || request.State.Kind != metadata.Show || request.State.Query.Title != "同名节目" || request.State.Query.Year != 2020 || request.State.Ref.Provider != "thetvdb" {
+			t.Errorf("模型或作品身份错误: %#v", request)
 		}
 		if len(request.Questions) != 3 {
 			t.Errorf("问题数量=%d", len(request.Questions))
@@ -72,45 +69,41 @@ func TestSelectUsesChoiceAndNoulWithIndependentSourceEvidence(t *testing.T) {
 			t.Errorf("Choice 必须采用完整的 criteria: %#v", selectQuestion)
 		}
 		for i, source := range []string{"tmdb", "thetvdb"} {
-			var evidence struct {
-				Work struct {
-					Source, ID, Title, Plot, Premiered string
-					OriginalTitle                      string `json:"original_title"`
-				} `json:"work"`
-				Episodes []struct {
-					Requested metadata.EpisodeKey `json:"requested"`
-					Record    struct {
-						Source        string
-						SeasonNumber  *int `json:"season_number"`
-						EpisodeNumber int  `json:"episode_number"`
-					} `json:"record"`
-				} `json:"episodes"`
-			}
-			if err := json.Unmarshal(selectQuestion.Criteria[fmt.Sprintf("c%d", i)], &evidence); err != nil {
+			var candidate metadata.Candidate
+			if err := json.Unmarshal(selectQuestion.Criteria[fmt.Sprintf("c%d", i)], &candidate); err != nil {
 				t.Error(err)
 			}
-			if evidence.Work.Source != source || evidence.Work.ID != "42" || evidence.Work.Title != "同名节目" || evidence.Work.OriginalTitle != "Original Show" || evidence.Work.Plot != "节目介绍" || evidence.Work.Premiered != "2020-01-02" || len(evidence.Episodes) != 2 || evidence.Episodes[0].Record.Source != source || evidence.Episodes[0].Record.SeasonNumber == nil || *evidence.Episodes[0].Record.SeasonNumber != 0 || evidence.Episodes[0].Requested.Episode != 2 || evidence.Episodes[1].Requested.Season != 1 || evidence.Episodes[1].Record.EpisodeNumber != 1 {
-				t.Errorf("候选来源或精简事实丢失: %#v", evidence)
+			if candidate.Ref.Provider != source || candidate.Ref.Kind != metadata.Show || candidate.Ref.ID != "42" || candidate.Title != "同名节目" || candidate.OriginalTitle != "Original Show" || candidate.Year != 2020 {
+				t.Errorf("候选来源或基本身份丢失: %#v", candidate)
 			}
 			match := request.Questions[fmt.Sprintf("match_%d", i)]
-			if match.Type != "noul" || !strings.Contains(string(match.Instructions), source) || !strings.Contains(string(match.Instructions), "试") && !strings.Contains(string(match.Instructions), "試") {
-				t.Errorf("Noul 未携带实际候选证据: %s", match.Instructions)
+			var instruction struct {
+				Question  string             `json:"question"`
+				Candidate metadata.Candidate `json:"candidate"`
+			}
+			if err := json.Unmarshal(match.Instructions, &instruction); err != nil {
+				t.Error(err)
+			}
+			if match.Type != "noul" || instruction.Candidate.Ref.Provider != source || instruction.Candidate.Title != "同名节目" || !strings.Contains(instruction.Question, "同一作品") {
+				t.Errorf("Noul 没有提出明确作品身份问题: %s", match.Instructions)
+			}
+			if strings.Contains(instruction.Question, "逐集") || strings.Contains(instruction.Question, "计数") || strings.Contains(instruction.Question, "覆盖") {
+				t.Errorf("Noul 混入季集完整性: %s", instruction.Question)
 			}
 		}
-		for _, forbidden := range []string{"test-secret", "不应发送的演员", "should-not-send.jpg", `"actors"`, `"artwork"`} {
+		for _, forbidden := range []string{"test-secret", `"files"`, `"path"`, `"filename"`, `"episodes"`, `"season"`, `"episode"`, `"group"`, `"hints"`, `"work"`, `"plot"`, `"premiered"`, `"external_ids"`, `"actors"`, `"artwork"`} {
 			if strings.Contains(string(body), forbidden) {
-				t.Errorf("请求泄露无关信息 %q", forbidden)
+				t.Errorf("请求混入非基本作品身份 %q", forbidden)
 			}
 		}
 		io.WriteString(w, acceptedResponse)
 	}))
 	defer server.Close()
-	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "test-secret"}, 0.9).Select(context.Background(), sourceRequest(), candidateOptions())
+	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "test-secret"}, 0.9).Select(context.Background(), sourceRequest(), workCandidates())
 	if err != nil || index != 1 || calls.Load() != 1 {
 		t.Fatalf("返回序位=%d, 错误=%v, 请求次数=%d", index, err, calls.Load())
 	}
 }
-
 func TestSelectAcceptsLowChoiceConfidenceAndThresholdBoundary(t *testing.T) {
 	for _, body := range []string{
 		strings.ReplaceAll(acceptedResponse, `"confidence":0.1`, `"confidence":0`),
@@ -120,7 +113,7 @@ func TestSelectAcceptsLowChoiceConfidenceAndThresholdBoundary(t *testing.T) {
 		t.Run(body, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, body) }))
 			defer server.Close()
-			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0.9).Select(context.Background(), sourceRequest(), candidateOptions())
+			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0.9).Select(context.Background(), sourceRequest(), workCandidates())
 			if err != nil || index != 1 {
 				t.Fatalf("序位=%d, 错误=%v", index, err)
 			}
@@ -163,7 +156,7 @@ func TestSelectRejectsInvalidAndNonmatchingAnswers(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, body) }))
 			defer server.Close()
-			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0.9).Select(context.Background(), sourceRequest(), candidateOptions())
+			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0.9).Select(context.Background(), sourceRequest(), workCandidates())
 			if err == nil || index != -1 {
 				t.Fatalf("非法响应被接受，序位=%d, 错误=%v", index, err)
 			}
@@ -181,7 +174,7 @@ func TestSelectRejectsHTTPFailuresWithoutRetryOrSecretLeak(t *testing.T) {
 				io.WriteString(w, `{"error":"Bearer secret-api-key"}`)
 			}))
 			defer server.Close()
-			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "secret-api-key"}, 0).Select(context.Background(), sourceRequest(), candidateOptions())
+			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "secret-api-key"}, 0).Select(context.Background(), sourceRequest(), workCandidates())
 			if err == nil || index != -1 || calls.Load() != 1 || !strings.Contains(err.Error(), fmt.Sprint(status)) || strings.Contains(err.Error(), "secret-api-key") {
 				t.Fatalf("序位=%d, 错误=%v, 调用=%d", index, err, calls.Load())
 			}
@@ -194,7 +187,7 @@ func TestSelectEnforcesResponseSizeLimit(t *testing.T) {
 		io.WriteString(w, strings.Repeat(" ", 2*1024*1024)+acceptedResponse)
 	}))
 	defer server.Close()
-	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), sourceRequest(), candidateOptions())
+	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), sourceRequest(), workCandidates())
 	if err == nil || index != -1 {
 		t.Fatalf("超长响应被接受: %d, %v", index, err)
 	}
@@ -217,7 +210,7 @@ func TestSelectNormalizesEndpointsAndUsesConfiguredModel(t *testing.T) {
 				io.WriteString(w, acceptedResponse)
 			}))
 			defer server.Close()
-			_, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL + suffix, ApiKey: "key", Model: "jev-1.13.0"}, 0).Select(context.Background(), sourceRequest(), candidateOptions())
+			_, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL + suffix, ApiKey: "key", Model: "jev-1.13.0"}, 0).Select(context.Background(), sourceRequest(), workCandidates())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -236,19 +229,19 @@ func TestSelectValidatesConfigurationAndCandidatesBeforeIO(t *testing.T) {
 		name      string
 		config    config.LLMConfig
 		threshold float64
-		options   []metadata.Option
+		options   []metadata.Candidate
 	}{
-		{"empty config", config.LLMConfig{}, 0, candidateOptions()},
-		{"wrong protocol", config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "key"}, 0, candidateOptions()},
-		{"empty key", config.LLMConfig{Type: "jev", BaseURL: server.URL}, 0, candidateOptions()},
-		{"temperature", config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", Temperature: &temperature}, 0, candidateOptions()},
+		{"empty config", config.LLMConfig{}, 0, workCandidates()},
+		{"wrong protocol", config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "key"}, 0, workCandidates()},
+		{"empty key", config.LLMConfig{Type: "jev", BaseURL: server.URL}, 0, workCandidates()},
+		{"temperature", config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", Temperature: &temperature}, 0, workCandidates()},
 		{"empty candidates", valid, 0, nil},
-		{"nil work", valid, 0, []metadata.Option{{}}},
-		{"too many candidates", valid, 0, make([]metadata.Option, 255)},
-		{"negative threshold", valid, -0.1, candidateOptions()},
-		{"threshold above one", valid, 1.1, candidateOptions()},
-		{"nan threshold", valid, math.NaN(), candidateOptions()},
-		{"invalid endpoint", config.LLMConfig{Type: "jev", BaseURL: "not-a-url", ApiKey: "key"}, 0, candidateOptions()},
+		{"empty work title", valid, 0, []metadata.Candidate{{}}},
+		{"too many candidates", valid, 0, make([]metadata.Candidate, 255)},
+		{"negative threshold", valid, -0.1, workCandidates()},
+		{"threshold above one", valid, 1.1, workCandidates()},
+		{"nan threshold", valid, math.NaN(), workCandidates()},
+		{"invalid endpoint", config.LLMConfig{Type: "jev", BaseURL: "not-a-url", ApiKey: "key"}, 0, workCandidates()},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client, err := New(test.config, test.threshold)
@@ -292,7 +285,7 @@ func TestSelectHonorsCancellationAndClientTimeout(t *testing.T) {
 				go func() { <-started; cancel() }()
 			}
 			start := time.Now()
-			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", TimeoutSeconds: test.timeoutSeconds}, 0).Select(ctx, sourceRequest(), candidateOptions())
+			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", TimeoutSeconds: test.timeoutSeconds}, 0).Select(ctx, sourceRequest(), workCandidates())
 			want := context.DeadlineExceeded
 			if test.canceled {
 				want = context.Canceled
@@ -312,7 +305,7 @@ func TestSelectTimeoutAfterResponseHeaders(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer server.Close()
-	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", TimeoutSeconds: 1}, 0).Select(context.Background(), sourceRequest(), candidateOptions())
+	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key", TimeoutSeconds: 1}, 0).Select(context.Background(), sourceRequest(), workCandidates())
 	if index != -1 || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("读取响应超时未保留取消语义: %d, %v", index, err)
 	}
@@ -342,9 +335,9 @@ func TestSelectAccepts254CandidatesAndRejects255WithoutTruncation(t *testing.T) 
 		json.NewEncoder(w).Encode(map[string]any{"model": "jev-1.13.0", "answers": answers, "usage": map[string]int{"input_tokens": 10000, "output_tokens": 1500}})
 	}))
 	defer server.Close()
-	options := make([]metadata.Option, 255)
+	options := make([]metadata.Candidate, 255)
 	for i := range options {
-		options[i] = candidateOptions()[0]
+		options[i] = workCandidates()[0]
 	}
 	client := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0)
 	index, err := client.Select(context.Background(), sourceRequest(), options[:254])
@@ -375,7 +368,7 @@ func TestSelectMovieAndDefaultMatchThreshold(t *testing.T) {
 				fmt.Fprintf(w, `{"model":"jev-1.13.0","answers":{"select":{"type":"choice","choice":"c0","probabilities":{"c0":1,"none":0},"confidence":1},"match_0":{"type":"noul","noul":%v}},"usage":{"input_tokens":200,"output_tokens":30}}`, test.match)
 			}))
 			defer server.Close()
-			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), metadata.Request{Kind: metadata.Movie, Filename: "Example.2020.mkv"}, []metadata.Option{{Work: &metadata.Record{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Movie, ID: "123"}, Title: "Example", Premiered: "2020-01-01"}}})
+			index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), metadata.Request{Kind: metadata.Movie, Filename: "Example.2020.mkv"}, []metadata.Candidate{{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Movie, ID: "123"}, Title: "Example", Year: 2020}})
 			if test.rejected && (index != -1 || err == nil) || !test.rejected && (index != 0 || err != nil) {
 				t.Fatalf("默认匹配门槛处理错误: %d, %v", index, err)
 			}
@@ -394,36 +387,32 @@ func TestSelectRejectsRedirectWithoutForwardingAuthorization(t *testing.T) {
 		http.Redirect(w, r, "/redirected", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), sourceRequest(), candidateOptions())
+	index, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "key"}, 0).Select(context.Background(), sourceRequest(), workCandidates())
 	if index != -1 || err == nil || redirected.Load() != 0 {
 		t.Fatalf("重定向被接受: %d, %v, 转发=%d", index, err, redirected.Load())
 	}
 }
 
-func TestEvidenceIncludesVerifiedExternalReferences(t *testing.T) {
-	option := metadata.Option{Work: &metadata.Record{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "371065"}, Title: "Show", ExternalIDs: []metadata.Identifier{{Type: "tmdb", Value: "74747"}}}}
-	payload, err := json.Marshal(buildEvaluation("jev-test", metadata.Request{Kind: metadata.Show}, []metadata.Option{option}))
+func TestEvidenceRetainsSourceScopedWorkReference(t *testing.T) {
+	candidate := metadata.Candidate{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, ID: "371065", Slug: "show"}, Title: "Show", OriginalTitle: "Original Show", Year: 2020}
+	payload, err := json.Marshal(buildEvaluation("jev-test", metadata.Request{Kind: metadata.Show}, []metadata.Candidate{candidate}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got struct {
+	var raw struct {
 		Questions map[string]struct {
 			Criteria map[string]json.RawMessage `json:"criteria"`
 		} `json:"questions"`
 	}
-	if err := json.Unmarshal(payload, &got); err != nil {
+	if err := json.Unmarshal(payload, &raw); err != nil {
 		t.Fatal(err)
 	}
-	var candidate struct {
-		Work struct {
-			ExternalIDs []metadata.Identifier `json:"external_ids"`
-		} `json:"work"`
-	}
-	if err := json.Unmarshal(got.Questions["select"].Criteria["c0"], &candidate); err != nil {
+	var actual metadata.Candidate
+	if err := json.Unmarshal(raw.Questions["select"].Criteria["c0"], &actual); err != nil {
 		t.Fatal(err)
 	}
-	if len(candidate.Work.ExternalIDs) != 1 || candidate.Work.ExternalIDs[0].Type != "tmdb" || candidate.Work.ExternalIDs[0].Value != "74747" {
-		t.Fatal("Jev证据遗漏网站已验证的同对象跨站编号")
+	if actual != candidate {
+		t.Fatalf("作品引用或基本身份丢失: %+v", actual)
 	}
 }
 
@@ -452,7 +441,7 @@ func TestJevCredentialsPreferExplicitConfigurationAndSnapshotEnvironment(t *test
 			defer server.Close()
 			client := newTestClient(t, config.LLMConfig{Name: "judge", Type: "jev", BaseURL: server.URL, ApiKey: test.configured}, 0.8)
 			t.Setenv("TYPESAFE_API_KEY", "changed-after-construction")
-			if _, err := client.Select(context.Background(), sourceRequest(), candidateOptions()); err != nil {
+			if _, err := client.Select(context.Background(), sourceRequest(), workCandidates()); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -480,7 +469,7 @@ func TestJevInstancesKeepTheirOwnEndpointCredentialsAndModel(t *testing.T) {
 		cfg.BaseURL, cfg.ApiKey, cfg.Model = "https://changed.invalid", "changed", "changed"
 	}
 	for _, client := range clients {
-		if selected, err := client.Select(context.Background(), sourceRequest(), candidateOptions()); err != nil || selected != 1 {
+		if selected, err := client.Select(context.Background(), sourceRequest(), workCandidates()); err != nil || selected != 1 {
 			t.Fatalf("Jev 实例请求失败: %d %v", selected, err)
 		}
 	}
@@ -492,5 +481,39 @@ func TestNewRejectsInvalidProxyBeforeRequest(t *testing.T) {
 		if err == nil || client != nil {
 			t.Fatalf("Jev 构造接受了非法代理: %v", err)
 		}
+	}
+}
+
+func TestSelectRejectsInvalidBasicCandidatesBeforeIO(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, `{"model":"jev-1.13.0","answers":{"select":{"type":"choice","choice":"c0","probabilities":{"c0":1,"none":0},"confidence":1},"match_0":{"type":"noul","noul":0.99}}}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "test"}, 0.9)
+	for _, test := range []struct {
+		name      string
+		candidate metadata.Candidate
+	}{
+		{"empty title", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}}},
+		{"blank title", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: "42"}, Title: " "}},
+		{"empty source", metadata.Candidate{Ref: metadata.Ref{Kind: metadata.Show, ID: "42"}, Title: "Show"}},
+		{"blank source", metadata.Candidate{Ref: metadata.Ref{Provider: " ", Kind: metadata.Show, ID: "42"}, Title: "Show"}},
+		{"missing identifier", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show}, Title: "Show"}},
+		{"slug only", metadata.Candidate{Ref: metadata.Ref{Provider: "thetvdb", Kind: metadata.Show, Slug: "show"}, Title: "Show"}},
+		{"blank identifier", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Show, ID: " "}, Title: "Show"}},
+		{"episode identity", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", Kind: metadata.Episode, ID: "42"}, Title: "Episode"}},
+		{"unknown kind", metadata.Candidate{Ref: metadata.Ref{Provider: "tmdb", ID: "42"}, Title: "Show"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index, err := client.Select(context.Background(), metadata.Request{Kind: metadata.Show}, []metadata.Candidate{test.candidate})
+			if err == nil || index != -1 {
+				t.Fatalf("非法基本候选被接受: %d %v", index, err)
+			}
+		})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("非法候选触发请求: %d", calls.Load())
 	}
 }

@@ -85,6 +85,15 @@ func (p *Provider) Search(ctx context.Context, query metadata.Query) ([]metadata
 			candidates = append(candidates, candidate)
 		}
 	}
+	if query.Year > 0 {
+		matching := candidates[:0]
+		for _, candidate := range candidates {
+			if candidate.Year == query.Year {
+				matching = append(matching, candidate)
+			}
+		}
+		candidates = matching
+	}
 	if len(candidates) == 0 {
 		return nil, metadata.ErrNotFound
 	}

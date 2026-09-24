@@ -51,7 +51,6 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 	if err != nil {
 		return fmt.Errorf("组织作品任务: %w", err)
 	}
-	var failures []error
 	var unmatched []preparedTask
 	succeeded := 0
 	for _, task := range tasks {
@@ -67,8 +66,7 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 			err = task.write(ctx, selected, images)
 		}
 		if err != nil {
-			failures = append(failures, fmt.Errorf("作品 %s: %w", task.request.Path, err))
-			continue
+			return fmt.Errorf("作品 %s: %w", task.request.Path, err)
 		}
 		succeeded += len(task.input)
 		if utils.Logger != nil {
@@ -84,29 +82,27 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 		}
 		descriptions, err := extractor.DescribeLocal(ctx, localInput)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("本地整理: %w", err))
-		} else {
-			byPath := make(map[string]ai.LocalDescription, len(descriptions))
-			for _, description := range descriptions {
-				byPath[description.RelativePath] = description
+			return fmt.Errorf("本地整理: %w", err)
+		}
+		byPath := make(map[string]ai.LocalDescription, len(descriptions))
+		for _, description := range descriptions {
+			byPath[description.RelativePath] = description
+		}
+		for _, task := range unmatched {
+			var own []ai.LocalDescription
+			for _, identity := range task.input {
+				own = append(own, byPath[identity.RelativePath])
 			}
-			for _, task := range unmatched {
-				var own []ai.LocalDescription
-				for _, identity := range task.input {
-					own = append(own, byPath[identity.RelativePath])
-				}
-				selected, err := task.local(own)
-				if err == nil {
-					err = task.write(ctx, selected, images)
-				}
-				if err != nil {
-					failures = append(failures, fmt.Errorf("本地作品 %s: %w", task.request.Path, err))
-					continue
-				}
-				succeeded += len(task.input)
-				if utils.Logger != nil {
-					utils.Logger.InfoF("本地编目完成：作品=%s 视频=%d", task.request.Path, len(task.input))
-				}
+			selected, err := task.local(own)
+			if err == nil {
+				err = task.write(ctx, selected, images)
+			}
+			if err != nil {
+				return fmt.Errorf("本地作品 %s: %w", task.request.Path, err)
+			}
+			succeeded += len(task.input)
+			if utils.Logger != nil {
+				utils.Logger.InfoF("本地编目完成：作品=%s 视频=%d", task.request.Path, len(task.input))
 			}
 		}
 	}
@@ -114,7 +110,7 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 		stats := extractor.Stats()
 		utils.Logger.InfoF("处理结束：媒体=%d 成功=%d 失败=%d 提取请求=%d 本地整理请求=%d", len(discovery.Files), succeeded, len(discovery.Files)-succeeded, stats.AnalyzeRequests, stats.LocalRequests)
 	}
-	return errors.Join(failures...)
+	return nil
 }
 
 func redactRunError(err error) string {
