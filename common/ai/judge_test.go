@@ -127,3 +127,44 @@ func TestLLMJudgeRejectsInvalidBasicCandidatesBeforeIO(t *testing.T) {
 		t.Fatalf("非法候选触发请求: %d %+v", calls.Load(), client.Stats())
 	}
 }
+
+func TestLLMJudgeOmitsEmptyManualReferenceOnWire(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var prompt struct {
+			Input map[string]json.RawMessage `json:"input"`
+		}
+		if len(body.Messages) != 2 {
+			t.Errorf("请求消息数量=%d", len(body.Messages))
+			w.WriteHeader(400)
+			return
+		}
+		if err := json.Unmarshal([]byte(body.Messages[1].Content), &prompt); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if ref, exists := prompt.Input["ref"]; exists {
+			t.Errorf("实际通用判断请求仍含空人工约束：%s", ref)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": `{"choice":"c0"}`}}}})
+	}))
+	defer server.Close()
+	client, err := New(config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "test", Model: "general", TimeoutSeconds: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewJudge(client).Select(context.Background(), metadata.Request{Kind: metadata.Show, Query: metadata.Query{Title: "作品"}}, judgeCandidates())
+	if err != nil || got != 0 {
+		t.Fatalf("请求失败：%d %v", got, err)
+	}
+}

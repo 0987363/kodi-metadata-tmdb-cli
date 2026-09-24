@@ -45,6 +45,7 @@ func (j *Judge) Select(ctx context.Context, request metadata.Request, options []
 		Requirements []string                      `json:"requirements"`
 	}{"select_metadata_candidate", metadata.JudgmentInputFor(request), candidates, map[string]string{"choice": "an exact key from candidates, or none"}, []string{
 		"Choose the candidate that represents the same movie or TV show as the extracted work title, original title, year and kind",
+		"Input title, chinese_title and original_title are work-name clues that may use different languages; match the work across these aliases, without requiring same-named fields to be textually identical",
 		"The user ref is an authoritative source and work constraint; candidate keys are local positions, not website identifiers",
 		"A candidate ref identifies a work only within its source and object kind; equal numbers across sources do not establish the same work",
 		"Choose none if no candidate matches or the evidence is insufficient; a single candidate can still be wrong",

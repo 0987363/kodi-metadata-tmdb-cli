@@ -517,3 +517,27 @@ func TestSelectRejectsInvalidBasicCandidatesBeforeIO(t *testing.T) {
 		t.Fatalf("非法候选触发请求: %d", calls.Load())
 	}
 }
+
+func TestSelectOmitsEmptyManualReferenceOnWire(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			State map[string]json.RawMessage `json:"state"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if ref, exists := payload.State["ref"]; exists {
+			t.Errorf("实际 Jev 请求仍含空人工约束：%s", ref)
+		}
+		io.WriteString(w, acceptedResponse)
+	}))
+	defer server.Close()
+	request := sourceRequest()
+	request.Ref = metadata.Ref{}
+	got, err := newTestClient(t, config.LLMConfig{Type: "jev", BaseURL: server.URL, ApiKey: "test-secret"}, 0.8).Select(context.Background(), request, workCandidates())
+	if err != nil || got != 1 {
+		t.Fatalf("请求失败：%d %v", got, err)
+	}
+}

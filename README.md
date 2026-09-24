@@ -23,6 +23,8 @@ Movie and TV processing uses one fixed workflow:
 
 Only movies and TV shows are supported. TMDb supports movies and TV; TheTVDB currently supports TV shows and episodes through public HTML, without a TheTVDB API key.
 
+Judgment requests omit absent manual references and preserve actual source and work constraints. Title clues may be translated names or aliases; matching does not require same-named fields to be textually identical.
+
 ## Named models and scraper settings
 
 Define independent instances in `llms`. Each `name` is a unique reference for tasks, `type` is `openai` (OpenAI-compatible chat completions) or `jev` (TypeSafe System One), and `model` identifies the server-side model. Each instance owns its URL, credentials, proxy and timeout.

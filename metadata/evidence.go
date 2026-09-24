@@ -1,9 +1,9 @@
 package metadata
 
-// JudgmentInput 只保留作品身份与人工来源约束，不把未验证编号提示作为判断证据。
+// JudgmentInput 只保留作品身份与实际人工约束；没有人工指定时省略零值引用。
 type JudgmentInput struct {
 	Kind  Kind  `json:"kind"`
-	Ref   Ref   `json:"ref"`
+	Ref   Ref   `json:"ref,omitzero"`
 	Query Query `json:"query"`
 }
 
