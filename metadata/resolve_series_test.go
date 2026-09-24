@@ -51,7 +51,7 @@ func TestResolveSeriesJudgesOnceAndFetchesFullSelectedSource(t *testing.T) {
 	}
 }
 
-func TestResolveSeriesErrorsDoNotBecomeUnmatched(t *testing.T) {
+func TestResolveSeriesErrorsAdvanceUnlessManuallyConstrained(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		err        error
@@ -70,9 +70,15 @@ func TestResolveSeriesErrorsDoNotBecomeUnmatched(t *testing.T) {
 			if test.manual {
 				req.Ref = Ref{Provider: "tmdb", Kind: Show, ID: "42"}
 			}
-			_, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), req, t.TempDir())
-			if err == nil || errors.Is(err, ErrNoMatch) || judge.calls != 1 || b.searchCalls != 0 {
-				t.Fatalf("错误变成未匹配: %v %+v", err, judge)
+			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), req, t.TempDir())
+			if test.manual {
+				if !errors.Is(err, ErrConstraintMismatch) || errors.Is(err, ErrSourcesExhausted) || judge.calls != 1 || b.searchCalls != 0 {
+					t.Fatalf("人工约束失效: %v %+v", err, judge)
+				}
+				return
+			}
+			if err != nil || got == nil || got.Work.Ref.Provider != "thetvdb" || judge.calls != 2 || b.searchCalls != 1 {
+				t.Fatalf("整剧事实错误未接续下一来源: %+v %v %+v", got, err, judge)
 			}
 		})
 	}
@@ -81,7 +87,7 @@ func TestResolveSeriesErrorsDoNotBecomeUnmatched(t *testing.T) {
 func TestExplicitWorkRejectedByJudgeDoesNotPermitLocalMetadata(t *testing.T) {
 	p := &testProvider{name: "tmdb"}
 	_, err := NewManager([]Provider{p}, 0, &testJudge{err: ErrNotFound}).Resolve(context.Background(), Request{Kind: Movie, Ref: Ref{Provider: "tmdb", Kind: Movie, ID: "42"}}, t.TempDir())
-	if !errors.Is(err, ErrConstraintMismatch) || errors.Is(err, ErrNoMatch) {
+	if !errors.Is(err, ErrConstraintMismatch) || errors.Is(err, ErrSourcesExhausted) {
 		t.Fatalf("人工明确作品被绕过: %v", err)
 	}
 }

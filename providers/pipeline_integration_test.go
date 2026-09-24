@@ -28,6 +28,8 @@ type pipelineFixture struct {
 	requests                               []string
 	analysis, local, choice, judgeType     string
 	choices                                []string
+	scores                                 []float64
+	judgeFailures                          []string
 	judgeCalls                             int
 	rawSource                              func(http.ResponseWriter, *http.Request) bool
 	modelStatus, judgeStatus, sourceStatus int
@@ -144,6 +146,20 @@ func (f *pipelineFixture) handle(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(f.judgeStatus)
 			return
 		}
+		if f.judgeCalls < len(f.judgeFailures) && f.judgeFailures[f.judgeCalls] != "" {
+			failure := f.judgeFailures[f.judgeCalls]
+			f.judgeCalls++
+			if failure == "judge_http" {
+				w.WriteHeader(503)
+			} else {
+				_, _ = w.Write([]byte(`{"answers":`))
+			}
+			return
+		}
+		score := 0.99
+		if f.judgeCalls < len(f.scores) {
+			score = f.scores[f.judgeCalls]
+		}
 		choice := f.choice
 		if f.judgeCalls < len(f.choices) {
 			choice = f.choices[f.judgeCalls]
@@ -154,7 +170,7 @@ func (f *pipelineFixture) handle(w http.ResponseWriter, r *http.Request) {
 		for key := range body.Questions["select"].Criteria {
 			probabilities[key] = 0
 			if key != "none" {
-				answers["match_"+strings.TrimPrefix(key, "c")] = map[string]any{"type": "noul", "noul": 0.99}
+				answers["match_"+strings.TrimPrefix(key, "c")] = map[string]any{"type": "noul", "noul": score}
 			}
 		}
 		probabilities[choice] = 1
@@ -311,7 +327,7 @@ func TestPipelineShowBatchAndJEV(t *testing.T) {
 		t.Fatalf("应基础和详情各一次: %v", requests)
 	}
 }
-func TestPipelineSourceFailurePreservesNFO(t *testing.T) {
+func TestPipelineSourceAndLocalFailuresPreserveNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Movie.mkv")
 	nfo := filepath.Join(f.root, "Movie.nfo")
@@ -325,8 +341,8 @@ func TestPipelineSourceFailurePreservesNFO(t *testing.T) {
 		t.Fatalf("旧 NFO 被覆盖: %s", got)
 	}
 	tasks, _ := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity]" {
-		t.Fatalf("来源错误触发了本地生成: %v", tasks)
+	if fmt.Sprint(tasks) != "[extract_media_identity describe_local_metadata]" {
+		t.Fatalf("来源错误没有进入本地整理: %v", tasks)
 	}
 }
 func TestPipelineNoMatchCreatesLocalIdentityWithoutFacts(t *testing.T) {
@@ -375,7 +391,7 @@ func TestPipelineMalformedClassificationPreservesNFO(t *testing.T) {
 	}
 }
 
-func TestPipelineJudgeNoneStopsWithoutLocalOutput(t *testing.T) {
+func TestPipelineJudgeRejectionAndLocalFailurePreservePreviousNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Unmatched.mkv")
 	f.analysis = `{"items":[{"relative_path":"Unmatched.mkv","media_type":"movie","title":"Unmatched"}]}`
@@ -386,14 +402,14 @@ func TestPipelineJudgeNoneStopsWithoutLocalOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := f.run(); err == nil {
-		t.Fatal("Jev 拒绝应退出")
+		t.Fatal("Jev 拒绝且本地整理失败应退出")
 	}
 	if readNFO(t, prior) != "original" {
-		t.Fatal("拒绝后仍写入本地 NFO")
+		t.Fatal("本地整理失败后仍写入 NFO")
 	}
 	tasks, requests := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity jev]" {
-		t.Fatalf("拒绝后继续模型任务：%v", tasks)
+	if fmt.Sprint(tasks) != "[extract_media_identity jev describe_local_metadata]" {
+		t.Fatalf("拒绝后没有进入本地整理：%v", tasks)
 	}
 	for _, request := range requests {
 		if strings.HasPrefix(request, "/3/movie/") {
@@ -402,7 +418,7 @@ func TestPipelineJudgeNoneStopsWithoutLocalOutput(t *testing.T) {
 	}
 }
 
-func TestPipelineJudgeFailurePreservesPreviousNFO(t *testing.T) {
+func TestPipelineJudgeAndLocalFailuresPreservePreviousNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Movie.mkv")
 	nfo := filepath.Join(f.root, "Movie.nfo")
@@ -417,7 +433,7 @@ func TestPipelineJudgeFailurePreservesPreviousNFO(t *testing.T) {
 		t.Fatalf("模型错误覆盖 NFO: %s", got)
 	}
 }
-func TestPipelineTMDbMalformedBatchPreservesPreviousShowNFO(t *testing.T) {
+func TestPipelineMalformedBatchAndLocalFailurePreservePreviousShowNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Show/Show.S01E01.mkv")
 	nfo := filepath.Join(f.root, "Show/tvshow.nfo")
@@ -439,8 +455,8 @@ func TestPipelineTMDbMalformedBatchPreservesPreviousShowNFO(t *testing.T) {
 		t.Fatalf("错误来源覆盖 NFO: %s", got)
 	}
 	tasks, _ := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity]" {
-		t.Fatalf("来源协议错误触发判断或本地任务: %v", tasks)
+	if fmt.Sprint(tasks) != "[extract_media_identity describe_local_metadata]" {
+		t.Fatalf("来源协议错误没有接续本地整理: %v", tasks)
 	}
 }
 
@@ -576,7 +592,7 @@ func TestPipelineFirstConfirmedSourceStopsBeforeSecond(t *testing.T) {
 		}
 	}
 }
-func TestPipelineSearchPageFailureDoesNotBecomeLocalMiss(t *testing.T) {
+func TestPipelineSearchPageAndLocalFailuresPreservePreviousNFO(t *testing.T) {
 	f := fixturePipeline(t)
 	f.file("Movie.mkv")
 	nfo := filepath.Join(f.root, "Movie.nfo")
@@ -604,8 +620,8 @@ func TestPipelineSearchPageFailureDoesNotBecomeLocalMiss(t *testing.T) {
 		t.Fatalf("分页错误覆盖 NFO: %s", got)
 	}
 	tasks, requests := f.snapshot()
-	if fmt.Sprint(tasks) != "[extract_media_identity]" {
-		t.Fatalf("分页错误触发本地生成: %v", tasks)
+	if fmt.Sprint(tasks) != "[extract_media_identity describe_local_metadata]" {
+		t.Fatalf("分页错误没有接续本地整理: %v", tasks)
 	}
 	found := false
 	for _, p := range requests {
@@ -618,7 +634,7 @@ func TestPipelineSearchPageFailureDoesNotBecomeLocalMiss(t *testing.T) {
 	}
 }
 
-func TestPipelineGeneralJudgeNoneAndFailurePreserveNFO(t *testing.T) {
+func TestPipelineGeneralJudgeNoneAndFailureReachLocal(t *testing.T) {
 	for _, scenario := range []string{"none", "error"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := fixturePipeline(t)
@@ -637,8 +653,8 @@ func TestPipelineGeneralJudgeNoneAndFailurePreserveNFO(t *testing.T) {
 			err := f.run()
 			got := readNFO(t, nfo)
 			tasks, _ := f.snapshot()
-			if err == nil || got != "original" || fmt.Sprint(tasks) != "[extract_media_identity select_metadata_candidate]" {
-				t.Fatalf("通用判断拒绝或错误未立即退出保护 NFO: %v %s %v", err, got, tasks)
+			if err != nil || !strings.Contains(got, "Local Movie") || !strings.Contains(got, `type="local"`) || fmt.Sprint(tasks) != "[extract_media_identity select_metadata_candidate describe_local_metadata]" {
+				t.Fatalf("通用判断拒绝或错误没有进入本地整理: %v %s %v", err, got, tasks)
 			}
 
 		})

@@ -20,13 +20,13 @@ func TestModelHintRequiresSearchConfirmationBeforeSkippingJudge(t *testing.T) {
 	}
 }
 
-func TestRejectedCandidateStopsBeforeLaterProviderAndLocal(t *testing.T) {
+func TestRejectedCandidatesExhaustAllSourcesBeforeLocal(t *testing.T) {
 	for _, rejection := range []error{ErrNotFound, ErrAmbiguous} {
 		t.Run(rejection.Error(), func(t *testing.T) {
 			a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 			_, err := NewManager([]Provider{a, b}, 0, &testJudge{err: rejection}).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "节目"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir())
-			if err == nil || errors.Is(err, ErrNoMatch) || !errors.Is(err, rejection) || b.searchCalls+b.fetchCalls != 0 || a.fetchCalls != 0 {
-				t.Fatalf("拒绝被当作空搜索或预取详情：err=%v a=%+v b=%+v", err, a, b)
+			if !errors.Is(err, ErrSourcesExhausted) || !errors.Is(err, rejection) || b.searchCalls != 1 || b.fetchCalls+a.fetchCalls != 0 {
+				t.Fatalf("拒绝未接续全部来源或预取了详情：err=%v a=%+v b=%+v", err, a, b)
 			}
 		})
 	}
@@ -73,7 +73,7 @@ func TestModelHintSelectsMatchedSearchRecordRatherThanFirstCandidate(t *testing.
 	}
 }
 
-func TestInvalidSourceCandidateAndConflictingHintAbortBeforeDetails(t *testing.T) {
+func TestInvalidSourceCandidatesAdvanceButInvalidHintsAbort(t *testing.T) {
 	cases := []struct {
 		name      string
 		candidate Candidate
@@ -91,8 +91,14 @@ func TestInvalidSourceCandidateAndConflictingHintAbortBeforeDetails(t *testing.T
 			next := &testProvider{name: "thetvdb"}
 			j := &testJudge{}
 			got, err := NewManager([]Provider{p, next}, 0, j).Resolve(context.Background(), Request{Kind: Movie, Query: Query{Title: "作品"}, Hints: tc.hints}, t.TempDir())
-			if got != nil || err == nil || errors.Is(err, ErrNoMatch) || p.fetchCalls+j.calls+next.searchCalls+next.fetchCalls != 0 {
-				t.Fatalf("非法身份仍进入详情/判断/后续来源：%+v %v p=%+v next=%+v", got, err, p, next)
+			if len(tc.hints) > 0 {
+				if got != nil || err == nil || errors.Is(err, ErrSourcesExhausted) || p.searchCalls+p.fetchCalls+j.calls+next.searchCalls+next.fetchCalls != 0 {
+					t.Fatalf("非法输入未先行终止：%+v %v p=%+v next=%+v", got, err, p, next)
+				}
+				return
+			}
+			if err != nil || got == nil || got.Work.Ref.Provider != "thetvdb" || p.fetchCalls != 0 || j.calls != 1 || next.searchCalls != 1 || next.fetchCalls != 1 {
+				t.Fatalf("非法来源候选未继续下一来源：%+v %v p=%+v next=%+v", got, err, p, next)
 			}
 		})
 	}

@@ -155,7 +155,7 @@ func TestResolveCancellationAndNoResults(t *testing.T) {
 	if _, err := m.Resolve(ctx, Request{Kind: Show}, t.TempDir()); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	if _, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "missing"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir()); !errors.Is(err, ErrNoMatch) || j.calls != 0 {
+	if _, err := m.Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "missing"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir()); !errors.Is(err, ErrSourcesExhausted) || j.calls != 0 {
 		t.Fatalf("空候选处理错误：%v", err)
 	}
 }

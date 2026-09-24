@@ -14,7 +14,7 @@ const (
 )
 
 var (
-	ErrNoMatch            = errors.New("所有适用来源正常完成但未确认匹配")
+	ErrSourcesExhausted   = errors.New("所有适用网站来源均未取得可用元数据")
 	ErrConstraintMismatch = errors.New("候选不满足人工约束")
 	ErrNotFound           = errors.New("未找到元数据")
 	ErrAmbiguous          = errors.New("元数据匹配存在歧义")

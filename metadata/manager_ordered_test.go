@@ -55,25 +55,26 @@ func (p *controlledProvider) FetchSeries(ctx context.Context, req SeriesRequest)
 	return result, nil
 }
 
-func TestResolveUnconfirmedSourceStops(t *testing.T) {
+func TestResolveUnconfirmedSourcesExhaustWithoutFetchingDetails(t *testing.T) {
 	for _, unconfirmed := range []error{ErrNotFound, ErrAmbiguous} {
 		t.Run(unconfirmed.Error(), func(t *testing.T) {
 			a, b := &testProvider{name: "tmdb"}, &testProvider{name: "thetvdb"}
 			calls := 0
 			judge := judgeFunc(func(_ context.Context, _ Request, candidates []Candidate) (int, error) {
 				calls++
-				if len(candidates) != 1 || candidates[0].Ref.Provider != "tmdb" || a.fetchCalls+b.searchCalls+b.fetchCalls != 0 {
+				if len(candidates) != 1 || a.fetchCalls+b.fetchCalls != 0 || calls == 1 && b.searchCalls != 0 {
 					t.Fatalf("判断前访问了详情或后续来源：%+v a=%+v b=%+v", candidates, a, b)
 				}
 				return -1, fmt.Errorf("未确认: %w", unconfirmed)
 			})
 			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 2}}}, t.TempDir())
-			if got != nil || !errors.Is(err, unconfirmed) || errors.Is(err, ErrNoMatch) || calls != 1 || b.searchCalls+b.fetchCalls != 0 {
-				t.Fatalf("判断拒绝未立即停止：%+v %v calls=%d", got, err, calls)
+			if got != nil || !errors.Is(err, unconfirmed) || !errors.Is(err, ErrSourcesExhausted) || calls != 2 || b.searchCalls != 1 {
+				t.Fatalf("逐源判断拒绝后未保留耗尽原因：%+v %v calls=%d", got, err, calls)
 			}
 		})
 	}
 }
+
 func TestResolveModelHintsAreSourceScopedAndUnconfirmedHintUsesJudge(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -95,7 +96,7 @@ func TestResolveModelHintsAreSourceScopedAndUnconfirmedHintUsesJudge(t *testing.
 		})
 	}
 }
-func TestResolveOnlyEmptySearchAdvances(t *testing.T) {
+func TestResolveEmptySearchAdvances(t *testing.T) {
 	for _, empty := range []bool{true, false} {
 		t.Run(fmt.Sprint(empty), func(t *testing.T) {
 			a := &controlledProvider{testProvider: &testProvider{name: "tmdb"}, search: func(context.Context, Query) ([]Candidate, error) {
@@ -113,19 +114,19 @@ func TestResolveOnlyEmptySearchAdvances(t *testing.T) {
 		})
 	}
 }
-func TestResolveSelectedDetailsFailureNeverAdvances(t *testing.T) {
+func TestResolveSelectedDetailsFailureAdvances(t *testing.T) {
 	for _, failure := range []error{ErrNotFound, ErrConstraintMismatch, errors.New("HTTP 500")} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			a, b := &testProvider{name: "tmdb", fetchError: failure}, &testProvider{name: "thetvdb"}
 			j := &testJudge{}
 			got, err := NewManager([]Provider{a, b}, 0, j).Resolve(context.Background(), Request{Kind: Show, Query: Query{Title: "作品"}, Episodes: []EpisodeKey{{Season: 1, Episode: 1}}}, t.TempDir())
-			if got != nil || !errors.Is(err, failure) || errors.Is(err, ErrNoMatch) || j.calls != 1 || b.searchCalls+b.fetchCalls != 0 {
-				t.Fatalf("选中详情错误未停止：%+v %v a=%+v b=%+v", got, err, a, b)
+			if err != nil || got == nil || got.Work.Ref.Provider != "thetvdb" || j.calls != 2 || b.searchCalls != 1 || b.fetchCalls != 1 {
+				t.Fatalf("选中详情错误未接续：%+v %v a=%+v b=%+v", got, err, a, b)
 			}
 		})
 	}
 }
-func TestResolveErrorsStopBeforeLaterSources(t *testing.T) {
+func TestResolveErrorsAreRetainedAfterSourcesExhausted(t *testing.T) {
 	requestError := errors.New("HTTP 403")
 	protocolError := errors.New("invalid JSON")
 	for _, tc := range []struct {
@@ -146,10 +147,10 @@ func TestResolveErrorsStopBeforeLaterSources(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &testProvider{name: "tmdb", err: tc.searchErr, fetchError: tc.fetchErr}
-			b, judge := &testProvider{name: "thetvdb"}, &testJudge{err: tc.judgeErr, index: tc.choice}
+			b, judge := &testProvider{name: "thetvdb", err: tc.searchErr, fetchError: tc.fetchErr}, &testJudge{err: tc.judgeErr, index: tc.choice}
 			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), Request{Kind: Movie, Query: Query{Title: "作品"}}, t.TempDir())
-			if got != nil || err == nil || b.searchCalls+b.fetchCalls != 0 {
-				t.Fatalf("错误被当成未确认或提前访问后续来源：%+v %v %+v", got, err, b)
+			if got != nil || !errors.Is(err, ErrSourcesExhausted) || b.searchCalls != 1 {
+				t.Fatalf("来源故障没有接续并保留耗尽信号：%+v %v %+v", got, err, b)
 			}
 			for _, want := range []error{tc.searchErr, tc.fetchErr, tc.judgeErr} {
 				if want != nil && !errors.Is(err, want) {
@@ -171,7 +172,7 @@ func TestResolveManualSourceNeverFallsThrough(t *testing.T) {
 	}{
 		{name: "source_rejected", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrNotFound, wantErr: ErrNotFound},
 		{name: "source_uncertain", ref: Ref{Provider: "tmdb", Kind: Show}, judgeErr: ErrAmbiguous, wantErr: ErrAmbiguous},
-		{name: "source_missing", ref: Ref{Provider: "tmdb", Kind: Show}, searchErr: ErrNotFound, wantErr: ErrNoMatch},
+		{name: "source_missing", ref: Ref{Provider: "tmdb", Kind: Show}, searchErr: ErrNotFound, wantErr: ErrConstraintMismatch},
 		{name: "fixed_work_missing", ref: Ref{Provider: "tmdb", Kind: Show, ID: "11"}, fetchErr: ErrNotFound, wantErr: ErrConstraintMismatch},
 		{name: "fixed_work_constraint_mismatch", ref: Ref{Provider: "tmdb", Kind: Show, ID: "11"}, fetchErr: ErrConstraintMismatch, wantErr: ErrConstraintMismatch},
 	} {
@@ -265,7 +266,7 @@ func TestResolveCandidateLimitAppliesPerSource(t *testing.T) {
 			})
 			got, err := NewManager([]Provider{a, b}, 0, judge).Resolve(context.Background(), Request{Kind: Movie, Query: Query{Title: "作品"}}, t.TempDir())
 			if count == 255 {
-				if got != nil || err == nil || a.fetchCalls+b.fetchCalls+b.searchCalls+calls != 0 {
+				if got != nil || err == nil || a.fetchCalls+b.fetchCalls+calls != 0 || b.searchCalls != 1 || !errors.Is(err, ErrSourcesExhausted) {
 					t.Fatalf("超限候选仍被处理：%+v %v a=%+v b=%+v calls=%d", got, err, a, b, calls)
 				}
 				return

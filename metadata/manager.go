@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fengqi/kodi-metadata-tmdb-cli/utils"
 )
 
 // MaxDecisionCandidates 是单个来源可交给判断器的候选上限。
@@ -28,7 +30,7 @@ func NewManager(providers []Provider, ttl time.Duration, judge Judge) *Manager {
 	return &Manager{providers: append([]Provider(nil), providers...), ttl: ttl, judge: judge}
 }
 
-// Resolve 先核验作品身份，确认后才获取完整作品与季集事实；任何异常立即返回。
+// Resolve 按来源顺序核验身份并取得完整事实；当前来源失败时接续下一来源。
 func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Option, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -36,26 +38,13 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 	if m == nil || m.judge == nil {
 		return nil, errors.New("未配置元数据获取与候选判断器")
 	}
-	if req.Kind != Movie && req.Kind != Show {
-		return nil, errors.New("选择请求必须是电影或节目")
+	if len(m.providers) == 0 {
+		return nil, errors.New("未配置元数据来源")
 	}
-	if req.Ref.Provider != "" && req.Ref.Kind != req.Kind || req.Ref.Provider == "" && (req.Ref.ID != "" || req.Ref.Slug != "") {
-		return nil, errors.New("人工作品引用缺少对应来源或对象类型不匹配")
+	if err := validateResolveRequest(req); err != nil {
+		return nil, err
 	}
-	if req.Episode < 0 || req.Season < 0 || req.Kind == Movie && (req.Episode != 0 || req.Group != "") {
-		return nil, errors.New("请求的媒体类型与季集或分组不一致")
-	}
-	if req.Kind == Show {
-		if len(req.Episodes) == 0 {
-			return nil, errors.New("剧集请求没有单集集合")
-		}
-		for _, key := range req.Episodes {
-			if key.Season < 0 || key.Episode < 1 {
-				return nil, errors.New("剧集请求含未知季集坐标")
-			}
-		}
-	}
-	supported := false
+	var failures []error
 	for _, p := range m.providers {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -63,85 +52,139 @@ func (m *Manager) Resolve(ctx context.Context, req Request, root string) (*Optio
 		if !p.Supports(req.Kind) || req.Ref.Provider != "" && req.Ref.Provider != p.Name() {
 			continue
 		}
-		supported = true
-		fixed := req.Ref.ID != "" || req.Ref.Slug != ""
-		var candidates []Candidate
-		var manualWork *Record
-		var err error
-		if fixed {
-			manualWork, err = m.fetch(ctx, p, Request{Kind: req.Kind, Ref: req.Ref}, root)
-			if err != nil {
-				return nil, fmt.Errorf("%s 人工指定作品获取失败: %w: %w", p.Name(), ErrConstraintMismatch, err)
+		option, err := m.resolveSource(ctx, p, req, root)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err == nil {
+			return option, nil
+		}
+		if req.Ref.Provider != "" {
+			return nil, fmt.Errorf("%s 人工指定来源或作品未成功: %w: %w", p.Name(), ErrConstraintMismatch, err)
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", p.Name(), err))
+		if utils.Logger != nil {
+			work := req.Path
+			if work == "" {
+				work = req.Query.Title
 			}
-			year := 0
-			if len(manualWork.Premiered) >= 4 {
-				year, _ = strconv.Atoi(manualWork.Premiered[:4])
-			}
-			candidates = []Candidate{{Ref: manualWork.Ref, Title: manualWork.Title, OriginalTitle: manualWork.OriginalTitle, Year: year}}
-		} else {
-			candidates, err = m.sourceCandidates(ctx, p, req, root)
-			if err != nil {
-				return nil, fmt.Errorf("%s 搜索: %w", p.Name(), err)
-			}
+			utils.Logger.ErrorF("网站元数据未成功：来源=%s 作品=%s 原因=%s；继续尝试下一方式", p.Name(), work, utils.RedactError(err))
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if len(candidates) == 0 {
-			continue
-		}
-		chosen := -1
-		if !fixed {
-			chosen, err = matchedHint(req, p.Name(), candidates)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if chosen < 0 {
-			m.statsMu.Lock()
-			if m.decisions == nil {
-				m.decisions = make(map[string]int64)
-			}
-			m.decisions[p.Name()]++
-			m.statsMu.Unlock()
-			chosen, err = m.judge.Select(ctx, req, candidates)
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			if err != nil {
-				if fixed {
-					return nil, fmt.Errorf("%s 人工指定作品判断失败: %w: %w", p.Name(), ErrConstraintMismatch, err)
-				}
-				return nil, fmt.Errorf("%s 作品判断失败: %w", p.Name(), err)
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if chosen < 0 || chosen >= len(candidates) {
-			return nil, errors.New("判断器返回了候选集合之外的选择")
-		}
-		selected := candidates[chosen]
-		if req.Kind == Show {
-			detail, err := m.fetchSeries(ctx, p, SeriesRequest{Ref: selected.Ref, Episodes: req.Episodes, Details: true}, root)
-			if err != nil {
-				return nil, fmt.Errorf("%s 选中节目详情不完整: %w", p.Name(), err)
-			}
-			return &Option{Work: detail.Work, Episodes: detail.Episodes}, nil
-		}
-		if manualWork != nil {
-			return &Option{Work: manualWork}, nil
-		}
-		work, err := m.fetch(ctx, p, Request{Kind: Movie, Ref: selected.Ref}, root)
-		if err != nil {
-			return nil, fmt.Errorf("%s 选中电影详情: %w", p.Name(), err)
-		}
-		return &Option{Work: work}, nil
 	}
-	if !supported {
+	if len(failures) == 0 && req.Ref.Provider != "" {
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupported, req.Ref.Provider, req.Kind)
 	}
-	return nil, ErrNoMatch
+	return nil, errors.Join(append([]error{ErrSourcesExhausted}, failures...)...)
+}
+
+func validateResolveRequest(req Request) error {
+	if req.Kind != Movie && req.Kind != Show {
+		return errors.New("选择请求必须是电影或节目")
+	}
+	if req.Ref.Provider != "" && req.Ref.Kind != req.Kind || req.Ref.Provider == "" && (req.Ref.ID != "" || req.Ref.Slug != "") {
+		return errors.New("人工作品引用缺少对应来源或对象类型不匹配")
+	}
+	if req.Episode < 0 || req.Season < 0 || req.Kind == Movie && (req.Episode != 0 || req.Group != "") {
+		return errors.New("请求的媒体类型与季集或分组不一致")
+	}
+	if req.Kind == Show {
+		if len(req.Episodes) == 0 {
+			return errors.New("剧集请求没有单集集合")
+		}
+		for _, key := range req.Episodes {
+			if key.Season < 0 || key.Episode < 1 {
+				return errors.New("剧集请求含未知季集坐标")
+			}
+		}
+	}
+	if req.Ref.ID == "" && req.Ref.Slug == "" && strings.TrimSpace(req.Query.Title+req.Query.ChineseTitle+req.Query.OriginalTitle) == "" {
+		return errors.New("通用 LLM 未提取可搜索的标题")
+	}
+	hints := make(map[string]string, len(req.Hints))
+	for _, hint := range req.Hints {
+		if hint.Provider == "" || hint.Kind != req.Kind || strings.TrimSpace(hint.ID) == "" {
+			return errors.New("LLM 作品引用来源、类型或编号无效")
+		}
+		if previous, ok := hints[hint.Provider]; ok && previous != hint.ID {
+			return errors.New("LLM 返回同来源的冲突作品引用")
+		}
+		hints[hint.Provider] = hint.ID
+	}
+	return nil
+}
+
+// resolveSource 将搜索、身份判断和完整事实获取作为同一来源的一次尝试。
+func (m *Manager) resolveSource(ctx context.Context, p Provider, req Request, root string) (*Option, error) {
+	fixed := req.Ref.ID != "" || req.Ref.Slug != ""
+	var candidates []Candidate
+	var manualWork *Record
+	var err error
+	if fixed {
+		manualWork, err = m.fetch(ctx, p, Request{Kind: req.Kind, Ref: req.Ref}, root)
+		if err != nil {
+			return nil, fmt.Errorf("人工指定作品获取失败: %w", err)
+		}
+		year := 0
+		if len(manualWork.Premiered) >= 4 {
+			year, _ = strconv.Atoi(manualWork.Premiered[:4])
+		}
+		candidates = []Candidate{{Ref: manualWork.Ref, Title: manualWork.Title, OriginalTitle: manualWork.OriginalTitle, Year: year}}
+	} else {
+		candidates, err = m.sourceCandidates(ctx, p, req, root)
+		if err != nil {
+			return nil, fmt.Errorf("搜索失败: %w", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("搜索正常完成但没有候选: %w", ErrNotFound)
+	}
+	chosen := -1
+	if !fixed {
+		chosen, err = matchedHint(req, p.Name(), candidates)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if chosen < 0 {
+		m.statsMu.Lock()
+		if m.decisions == nil {
+			m.decisions = make(map[string]int64)
+		}
+		m.decisions[p.Name()]++
+		m.statsMu.Unlock()
+		chosen, err = m.judge.Select(ctx, req, candidates)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		if err != nil {
+			return nil, fmt.Errorf("作品判断失败: %w", err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if chosen < 0 || chosen >= len(candidates) {
+		return nil, errors.New("判断器返回了候选集合之外的选择")
+	}
+	selected := candidates[chosen]
+	if req.Kind == Show {
+		detail, err := m.fetchSeries(ctx, p, SeriesRequest{Ref: selected.Ref, Episodes: req.Episodes, Details: true}, root)
+		if err != nil {
+			return nil, fmt.Errorf("选中节目详情不完整: %w", err)
+		}
+		return &Option{Work: detail.Work, Episodes: detail.Episodes}, nil
+	}
+	if manualWork != nil {
+		return &Option{Work: manualWork}, nil
+	}
+	work, err := m.fetch(ctx, p, Request{Kind: Movie, Ref: selected.Ref}, root)
+	if err != nil {
+		return nil, fmt.Errorf("选中电影详情失败: %w", err)
+	}
+	return &Option{Work: work}, nil
 }
 
 // matchedHint 只核对当前来源、当前对象类型的作品编号，未命中交给候选判断器。
@@ -195,9 +238,6 @@ func (m *Manager) Statistics() map[string]SourceStats {
 func (m *Manager) sourceCandidates(ctx context.Context, p Provider, req Request, root string) ([]Candidate, error) {
 	query := req.Query
 	query.Kind = req.Kind
-	if strings.TrimSpace(query.Title+query.ChineseTitle+query.OriginalTitle) == "" {
-		return nil, errors.New("通用 LLM 未提取可搜索的标题")
-	}
 	file := cacheFile(root, p, "identity-search-v1", Request{Kind: req.Kind, Query: query})
 	candidates, hit, err := readCache[[]Candidate](file, m.ttl)
 	if err != nil {

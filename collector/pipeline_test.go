@@ -169,8 +169,8 @@ func (p *failingRunSource) Fetch(ctx context.Context, req metadata.Request) (*me
 	return record, err
 }
 
-func TestRunStopsImmediatelyAfterFirstWorkFailure(t *testing.T) {
-	for _, stage := range []string{"search", "detail", "image", "write", "unmatched_before_failure"} {
+func TestRunStopsImmediatelyAfterFirstOutputFailure(t *testing.T) {
+	for _, stage := range []string{"image", "write", "unmatched_before_failure"} {
 		t.Run(stage, func(t *testing.T) {
 			oldCollector, oldScraper := config.Collector, config.Scraper
 			t.Cleanup(func() { config.Collector, config.Scraper = oldCollector, oldScraper })
@@ -205,11 +205,7 @@ func TestRunStopsImmediatelyAfterFirstWorkFailure(t *testing.T) {
 			}
 			source := &failingRunSource{}
 			switch stage {
-			case "search", "unmatched_before_failure":
-				source.searchError = errors.New("搜索异常")
-			case "detail":
-				source.fetchError = errors.New("详情异常")
-			case "image":
+			case "image", "unmatched_before_failure":
 				source.imageURL = "https://images.invalid/poster.jpg"
 			}
 			err = Run(context.Background(), root, client, metadata.NewManager([]metadata.Provider{source}, 0, &runJudge{}), &artwork.Downloader{})
@@ -229,23 +225,17 @@ func TestRunStopsImmediatelyAfterFirstWorkFailure(t *testing.T) {
 	}
 }
 
-func TestRunLogsOriginalFailureOnceWithoutSecrets(t *testing.T) {
-	oldModels, oldTMDB, oldLog, oldLogger := config.LLMs, config.Tmdb, config.Log, utils.Logger
+func TestRunLogsTerminalFailureOnce(t *testing.T) {
+	oldLog, oldLogger := config.Log, utils.Logger
 	oldOutput := log.Writer()
 	t.Cleanup(func() {
-		config.LLMs, config.Tmdb, config.Log, utils.Logger = oldModels, oldTMDB, oldLog, oldLogger
+		config.Log, utils.Logger = oldLog, oldLogger
 		log.SetOutput(oldOutput)
 	})
-	config.LLMs = []config.LLMConfig{{ApiKey: "model-secret"}}
-	config.Tmdb = &config.TmdbConfig{ApiKey: "tmdb-secret"}
 	config.Log = &config.LogConfig{Mode: config.LogModeStdout, Level: config.LogLevelDebug}
 	utils.InitLogger()
 	var output bytes.Buffer
 	log.SetOutput(&output)
-	original := errors.New("请求异常 model-secret tmdb-secret")
-	if message := redactRunError(original); strings.Contains(message, "-secret") || !strings.Contains(message, "请求异常") {
-		t.Fatalf("脱敏错误: %s", message)
-	}
 	err := Run(context.Background(), t.TempDir(), nil, nil, nil)
 	if err == nil || strings.Count(output.String(), err.Error()) != 1 {
 		t.Fatalf("异常没有唯一日志: %v %s", err, output.String())
@@ -286,5 +276,53 @@ func TestRunStopsLocalWritesAfterFirstFailure(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "second.nfo")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("本地首部写入失败后仍写入后续: %v", err)
+	}
+}
+
+func TestRunWebsiteFailuresReachOneLocalBatch(t *testing.T) {
+	for _, stage := range []string{"search", "detail"} {
+		t.Run(stage, func(t *testing.T) {
+			oldCollector, oldScraper := config.Collector, config.Scraper
+			t.Cleanup(func() { config.Collector, config.Scraper = oldCollector, oldScraper })
+			config.Collector, config.Scraper = &config.CollectorConfig{}, &config.ScraperConfig{}
+			root := t.TempDir()
+			for _, name := range []string{"first.mkv", "second.mkv"} {
+				if err := os.WriteFile(filepath.Join(root, name), nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				payload := `{"items":[{"relative_path":"first.mkv","media_type":"movie","title":"首部"},{"relative_path":"second.mkv","media_type":"movie","title":"后续"}]}`
+				if calls == 2 {
+					payload = `{"items":[{"relative_path":"first.mkv","title":"本地首部","plot":"","genres":[]},{"relative_path":"second.mkv","title":"本地后续","plot":"","genres":[]}]}`
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": payload}}}})
+			}))
+			defer server.Close()
+			client, err := ai.New(config.LLMConfig{Type: "openai", BaseURL: server.URL, ApiKey: "test", Model: "test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := &failingRunSource{}
+			if stage == "search" {
+				source.searchError = errors.New("HTTP 503")
+			} else {
+				source.fetchError = errors.New("详情缺失")
+			}
+			if err := Run(context.Background(), root, client, metadata.NewManager([]metadata.Provider{source}, 0, &runJudge{}), &artwork.Downloader{}); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || len(source.queries) != 2 {
+				t.Fatalf("网站失败阻断后续任务或重复本地整理: model=%d sources=%v", calls, source.queries)
+			}
+			for _, name := range []string{"first.nfo", "second.nfo"} {
+				data, err := os.ReadFile(filepath.Join(root, name))
+				if err != nil || !strings.Contains(string(data), `type="local"`) {
+					t.Fatalf("本地批量结果缺失: %s %s %v", name, data, err)
+				}
+			}
+		})
 	}
 }

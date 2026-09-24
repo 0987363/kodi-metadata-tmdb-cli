@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"fengqi/kodi-metadata-tmdb-cli/artwork"
 	"fengqi/kodi-metadata-tmdb-cli/common/ai"
-	"fengqi/kodi-metadata-tmdb-cli/config"
 	"fengqi/kodi-metadata-tmdb-cli/metadata"
 	"fengqi/kodi-metadata-tmdb-cli/utils"
 )
@@ -23,7 +21,7 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 			}
 		}
 		if runErr != nil && utils.Logger != nil {
-			utils.Logger.Error(redactRunError(runErr))
+			utils.Logger.Error(utils.RedactError(runErr))
 		}
 	}()
 	if extractor == nil || manager == nil {
@@ -58,7 +56,7 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 			return err
 		}
 		selected, err := manager.Resolve(ctx, task.request, task.cacheRoot)
-		if errors.Is(err, metadata.ErrNoMatch) {
+		if errors.Is(err, metadata.ErrSourcesExhausted) {
 			unmatched = append(unmatched, task)
 			continue
 		}
@@ -82,7 +80,7 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 		}
 		descriptions, err := extractor.DescribeLocal(ctx, localInput)
 		if err != nil {
-			return fmt.Errorf("本地整理: %w", err)
+			return fmt.Errorf("所有适用网站来源均未成功，AI 本地整理失败: %w", err)
 		}
 		byPath := make(map[string]ai.LocalDescription, len(descriptions))
 		for _, description := range descriptions {
@@ -94,11 +92,11 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 				own = append(own, byPath[identity.RelativePath])
 			}
 			selected, err := task.local(own)
-			if err == nil {
-				err = task.write(ctx, selected, images)
-			}
 			if err != nil {
-				return fmt.Errorf("本地作品 %s: %w", task.request.Path, err)
+				return fmt.Errorf("AI 本地整理结果校验失败，作品 %s: %w", task.request.Path, err)
+			}
+			if err := task.write(ctx, selected, images); err != nil {
+				return fmt.Errorf("本地作品输出失败，作品 %s: %w", task.request.Path, err)
 			}
 			succeeded += len(task.input)
 			if utils.Logger != nil {
@@ -111,17 +109,4 @@ func Run(ctx context.Context, path string, extractor *ai.Client, manager *metada
 		utils.Logger.InfoF("处理结束：媒体=%d 成功=%d 失败=%d 提取请求=%d 本地整理请求=%d", len(discovery.Files), succeeded, len(discovery.Files)-succeeded, stats.AnalyzeRequests, stats.LocalRequests)
 	}
 	return nil
-}
-
-func redactRunError(err error) string {
-	message := err.Error()
-	for _, model := range config.LLMs {
-		if model.ApiKey != "" {
-			message = strings.ReplaceAll(message, model.ApiKey, "[已隐藏]")
-		}
-	}
-	if config.Tmdb != nil && config.Tmdb.ApiKey != "" {
-		message = strings.ReplaceAll(message, config.Tmdb.ApiKey, "[已隐藏]")
-	}
-	return message
 }

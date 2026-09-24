@@ -10,16 +10,16 @@ Major changes:
 
 - Separate metadata providers, model judgment and output; support the TMDb API and TheTVDB web scraping without a TheTVDB user API key.
 - Add named LLM instances and dedicated scraper settings. A general LLM extracts file identity, while an OpenAI-compatible model or TypeSafe Jev judges candidates.
-- Search sources in configured order and cross-check model-provided record hints against real search candidates. An exact source/type/record match skips model judgment; otherwise judge basic work candidates. Any failure terminates the entire process immediately.
+- Search sources in configured order and cross-check model-provided record hints against real search candidates. An exact source/type/record match skips model judgment; otherwise judge basic work candidates. A source failure advances to the next source; only exhaustion of website sources and input-only AI description ends metadata acquisition in failure.
 - Target Kodi, Jellyfin, Emby and Silo Server with unified NFO output, correcting runtime, episode coordinates, website identities, artwork and disc-folder paths. Reader contracts were checked against official documentation and source code; actual server imports have not been certified.
 - Limit the scope to movies and TV shows; remove music-video processing, ffmpeg/ffprobe, Kodi JSON-RPC control and unused rule-based parsing.
 - Accept exactly one media directory through `--path`, process it once and exit. Discover mixed media without preset movie/show roots; the general LLM classifies and extracts in batches of at most 50 files, then the program builds movie and whole-show tasks.
-- Fetch the episodes needed by each show task in source batches. If every applicable source search returns a normal empty result, describe local titles using only directory and filename text and program-generated local identities.
+- Fetch the episodes needed by each show task in source batches. If all applicable website sources fail to produce usable metadata, describe local titles using only directory and filename text and program-generated local identities.
 - Keep explicit directory, keyword and temporary-suffix filters, DVD/Blu-ray handling, manual source and episode constraints, fact caching, atomic writes, error propagation, proxy isolation and connection deadlines.
 
 Movie and TV processing uses one fixed workflow:
 
-**Single-directory discovery → batched general-LLM classification → movie or whole-show task → real basic search candidates → exact identity cross-check or configured judgment → selected work and episode details → NFO and artwork.** Only normal empty searches from every applicable source permit input-only local description.
+**Single-directory discovery → batched general-LLM classification → movie or whole-show task → real basic search candidates → exact identity cross-check or configured judgment → selected work and episode details → NFO and artwork.** After all applicable website sources fail to produce usable metadata, input-only AI description is attempted.
 
 Only movies and TV shows are supported. TMDb supports movies and TV; TheTVDB currently supports TV shows and episodes through public HTML, without a TheTVDB API key.
 
@@ -33,7 +33,7 @@ Define independent instances in `llms`. Each `name` is a unique reference for ta
 
 `scraper` also owns `providers`, `cache_hours`, `jev_match_threshold`, and `nfo_field.tag/genre`. Jev uses Noul match probability, not Choice confidence, with a default threshold of 0.8. Explicit Jev credentials take precedence over `TYPESAFE_API_KEY`. Temperature is allowed only on `openai` instances.
 
-Duplicate names, missing references, unsupported types, Jev extraction and unknown fields are errors. `tmdb.retry_count`, formerly the number of network-failure retries, is removed and rejected because the first request failure must terminate the process; retry backoff and retry statistics are removed with it. The old `ai`, `jev`, `metadata`, `kodi`, `ffmpeg`, music-video and unused naming-mode configuration is removed. Move NFO flags from `collector` to `scraper`. See [example.config.json](example.config.json) and [the complete design](docs/metadata-providers.md) for the new configuration.
+Duplicate names, missing references, unsupported types, Jev extraction and unknown fields are errors. `tmdb.retry_count`, formerly the number of network-failure retries, is removed and rejected because failed requests are not implicitly retried; orchestration advances to the next metadata method; retry backoff and retry statistics are removed with it. The old `ai`, `jev`, `metadata`, `kodi`, `ffmpeg`, music-video and unused naming-mode configuration is removed. Move NFO flags from `collector` to `scraper`. See [example.config.json](example.config.json) and [the complete design](docs/metadata-providers.md) for the new configuration.
 
 ## Retrieval and judgment
 
@@ -43,11 +43,11 @@ Providers are processed in `scraper.providers` order. Unless a manual explicit w
 
 The configured Jev or OpenAI-compatible judge receives only basic work evidence: title, original title, year, movie/show type and source record reference. It receives no complete file list, season/episode coordinates, groups, episode plot, actors or artwork catalogs. Each source with unconfirmed candidates is judged once, including a single candidate. Jev uses a Choice with `none` and a Noul match question per candidate; the selected candidate must reach `scraper.jev_match_threshold` (default `0.8`, configurable in `(0,1]`). Choice confidence is relative separability, not absolute match probability.
 
-A confirmed work stops source traversal. Only then does the program retrieve the selected movie's full facts or the selected show's facts and required seasons/episodes, preserving batch limits, caching and necessary TheTVDB episode-detail requests. Unselected candidates do not trigger full detail or episode retrieval. Models never generate factual website metadata.
+After a work is confirmed, the program retrieves the selected movie's full facts or the selected show's facts and required seasons/episodes, preserving batch limits, caching and necessary TheTVDB episode-detail requests. Unselected candidates do not trigger full detail or episode retrieval. Models never generate factual website metadata.
 
-Only a normal empty search advances to the next applicable source. `none`, low Jev match probability, invalid candidates, extraction/transport/schema/detail/artwork/write failures and manual conflicts terminate the entire process immediately: the owning runtime boundary logs the sanitized original error once, and `main` exits nonzero without duplicate logging, retries, later sources, later works or local description. Normally unknown optional facts remain empty and are not failures. Already completed files are not rolled back.
+Empty searches, judgment rejection/low probability, and search/judgment/detail HTTP or protocol failures are logged with redacted causes, then the next applicable source is attempted. A source succeeds only after the complete required metadata is available. If all website sources fail, input-only AI description is attempted. Initial discovery/classification errors, cancellation, manual constraints and final artwork/NFO output errors remain terminal. Requests are not implicitly retried, and completed files are not rolled back.
 
-If every applicable source search returns normally empty, the general LLM's `DescribeLocal` task returns only input-supported title, plot and genres; unknown values remain empty. The program generates stable `local` identifiers for NFO objects, never fabricated website record numbers or source URLs. A failed manual explicit reference or rejected candidate cannot enter this path.
+If all applicable website sources fail to produce usable metadata, the general LLM's `DescribeLocal` task returns only input-supported titles, plots and genres; unknown facts remain empty. The program generates stable `local` object identifiers, never website record numbers or source URLs. If AI description also fails, the CLI exits nonzero. An explicit manual source or work constraint cannot be replaced by another source or local output.
 
 ## Manual constraints and cache
 
@@ -81,7 +81,7 @@ cp example.config.json config.json
 ./kodi-tmdb-linux-amd64 -config config.json --path "/media/混合媒体库"
 ```
 
-`--path` must appear exactly once and name an existing directory. Positional paths, repeated `--path` and `-mode` fail; there is no default current directory. `-config` selects the config file; `-version` and help remain available. Processing ends after this scan. The first failure immediately terminates the entire CLI with a nonzero exit code; later works are not processed and previous successful files are not rolled back. Go 1.27+ is required for source builds:
+`--path` must appear exactly once and name an existing directory. Positional paths, repeated `--path` and `-mode` fail; there is no default current directory. `-config` selects the config file; `-version` and help remain available. Processing ends after this scan. The CLI exits nonzero if all metadata methods fail, a common execution prerequisite fails, or final output fails; previous successful files are not rolled back. Go 1.27+ is required for source builds:
 
 ```sh
 go test ./...
@@ -90,6 +90,6 @@ go vet ./...
 make linux-amd64
 ```
 
-The earlier merged implementation passed full race tests, vet and four platform builds. The identity cross-check, basic-work judgment and immediate process-termination changes described here are implemented and passed all 16 test packages and vet. Final master race tests (218 test functions, 594 nodes) and four platform builds passed. The first real-sample run stopped immediately on the extraction service HTTP 503, so real matching remains unverified. Actual `res.txt` / `res2.txt` sample acceptance remains incomplete; see the [current validation record](docs/validation-2026-09-24.md). Those filenames identify validation inputs, not production classification rules. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit/verification boundaries](docs/provider-audit.md). Controlled HTTP tests establish contracts and behavior; they do not establish real model accuracy on your media library or actual server import.
+The merged baseline passed race tests, vet and platform builds. The first two real sample shows passed for 52 videos; the old stop-on-first-source-failure rule interrupted Super.Science before TMDb or local AI ran. This revision verifies ordered continuation through the metadata methods. Overall acceptance of the ten res.txt shows and the res2.txt collection remains incomplete; see the [validation record](docs/validation-2026-09-24.md). Controlled tests do not establish real model accuracy or actual server import. See [Chinese usage](README.zh-CN.md), [design](docs/metadata-providers.md), and [audit boundaries](docs/provider-audit.md).
 
 Sources: [TMDb](https://www.themoviedb.org/), [TheTVDB](https://thetvdb.com/), [TypeSafe API](https://docs.typesafe.ai/api). [GPL-3.0](LICENSE).
