@@ -130,6 +130,6 @@ make linux-amd64
 
 [设计与契约](docs/metadata-providers.md) · [整改与验收报告](docs/provider-audit.md)
 
-一次性 CLI、批量分类、整剧取数和受限本地整理已有主分支 race、vet 与构建证据。三方式接续已合并推送，主分支完整复验通过。真实固定样本前三部共 60 个视频已通过，其中 Super.Science 在两个网站候选被拒绝后成功使用 AI 本地整理；第四部 104 个视频按用户要求暂时跳过；Friends 的 234 个视频因一文件多集无法用当前单集协议表达而停止，尚未进入网站请求。10 部节目及 res2.txt 的整体验收尚未完成，见 [复验记录](docs/validation-2026-09-24.md)。受控回归不代表真实模型准确率或四种媒体软件实际导入已验证。
+一次性 CLI、批量分类、整剧取数和三方式接续已有受控回归与构建证据。本轮其余样本已执行完毕；累计1099个视频中输出校验通过149个、布局校验失败403个、执行失败209个、按用户要求暂时跳过338个，整体尚未验收通过。见[最新续验报告](docs/validation-2026-09-25.md)和[待整改问题](docs/known-issues.md)。本轮仅记录问题，没有调整模型、门槛或生产规则；受控回归和空视频输出不能代表四种媒体软件实际导入已验证。
 
 数据来源：[TMDb](https://www.themoviedb.org/) · [TheTVDB](https://thetvdb.com/)。决策协议：[TypeSafe 官方 API](https://docs.typesafe.ai/api)。许可证：[GPL-3.0](LICENSE)。
